@@ -1,7 +1,7 @@
-
+# Copyright (c) 2025 Piotr Migus
+# This code is licensed under the MIT License.
+# See the LICENSE file in the repository root for full license information.
 """
-Module: puiseux_expansions.py
-
 Description:
     This module computes Puiseux series expansions for algebraic functions defined by a polynomial f(x, y).
     Puiseux series are generalized power series that allow fractional exponents and are useful in studying
