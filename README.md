@@ -45,18 +45,26 @@ This repository provides the full codebase and reproducible scripts for our Newt
 
 **MIT-BIH Arrhythmia Database is *not* stored in this repository.**
 
+**Manual download**  
+   * Go to <https://physionet.org/content/mitdb/1.0.0/>  
+   * Download all files and unzip them into `mit-bih/`.
+
+**Licence notice:**  
+MIT-BIH data are released under the PhysioNet open-access license.  
+By downloading the files you agree to its terms.
+
 -----
 
 ## Installation
 1. Clone the repository:
    ```bash
-git clone https://github.com/piotrmgs/puiseux-cvnn.git
-cd puiseux-cvnn
+   git clone https://github.com/piotrmgs/puiseux-cvnn.git
+   cd puiseux-cvnn
    ```   
 2. Create a virtual environment and install dependencies:
    ```bash
-conda env create -f environment.yml
-conda activate puiseux-cvnn
+   conda env create -f environment.yml
+   conda activate puiseux-cvnn
    ```
 
 ------
