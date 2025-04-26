@@ -1,6 +1,7 @@
+# Copyright (c) 2025 Piotr Migus
+# This code is licensed under the MIT License.
+# See the LICENSE file in the repository root for full license information.
 """
-main.py
-
 Main script for training and evaluating a complex-valued neural network (CVNN) 
 on the MIT-BIH Arrhythmia Dataset using K-fold cross-validation across patients.
 
@@ -25,39 +26,6 @@ Key Features:
 - Cross-validation ensures generalization across patients.
 - Visual tools for model interpretability and calibration evaluation.
 - CLI arguments for easy experiment control.
-
-Usage:
-------
-$ python main.py --data_folder ./mit-bih --output_folder ./results --epochs 20 --folds 10 --threshold 0.6
-
-CLI Arguments:
---------------
---data_folder       Path to preprocessed MIT-BIH data directory
---output_folder     Directory to save models, plots, and logs
---epochs            Number of training epochs
---lr                Learning rate
---batch_size        Batch size for DataLoaders
---folds             Number of cross-validation folds (default: 10)
---threshold         Probability threshold for uncertainty detection
---cpu               Force training on CPU (useful for debugging)
-
-Outputs:
---------
-- run.log                   : full training logs
-- *.png                     : plots for performance, calibration, uncertainty
-- uncertain_all.csv         : CSV with uncertain test examples
-- best_model_full.pt        : best model weights from full retraining
-
-Requires:
----------
-- Python ≥ 3.9
-- PyTorch
-- NumPy, SciPy, scikit-learn, seaborn, matplotlib
-- Custom modules: `mit_bih_pre` and `src.find_up_*`
-
-Author:
--------
-[Your Name or Team], [Year]
 """
 
 import os
