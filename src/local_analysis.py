@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Piotr Migus
+# This code is licensed under the MIT License.
+# See the LICENSE file in the repository root for full license information.
 ############################################################
 # Experiment with a toy problem in C^2 (4-dimensional real space):
 #
