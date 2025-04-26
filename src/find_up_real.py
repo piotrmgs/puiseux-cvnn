@@ -1,4 +1,6 @@
-
+# Copyright (c) 2025 Piotr Migus
+# This code is licensed under the MIT License.
+# See the LICENSE file in the repository root for full license information.
 """
 This module provides utility functions for preprocessing, modeling, training, and evaluating 
 complex-valued neural networks, particularly applied to ECG classification using the MIT-BIH 
@@ -14,12 +16,6 @@ Main functionalities include:
 
 This module is designed to support experiments involving complex-valued deep learning models
 with a focus on interpretability, calibration, and robust evaluation.
-
-Dependencies:
-- PyTorch
-- NumPy, SciPy, Scikit-learn
-- Seaborn, Matplotlib
-- MIT-BIH-specific preprocessing tools from `mit_bih_pre`
 """
 
 import os
