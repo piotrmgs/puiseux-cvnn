@@ -1,8 +1,19 @@
+---
+
+## About this repo
+This repository contains the complete, reproducible codebase that accompanies the paper *“Newton-Puiseux Analysis for Interpretability and Calibration of Complex-Valued Neural Networks”*.  
+
+It implements our end-to-end pipeline – from data preprocessing through CVNN training to Newton-Puiseux-based local analysis – for both a controlled synthetic benchmark and the MIT-BIH Arrhythmia corpus.
+
+---
+
 
 # Newton‑Puiseux Analysis for Interpretability and Calibration of CVNNs
 
 ## Overview
 This repository provides the full codebase and reproducible scripts for our Newton‑Puiseux framework, which enhances interpretability and calibration of complex‑valued neural networks (CVNNs). We demonstrate our approach on both a controlled synthetic dataset and the MIT‑BIH arrhythmia corpus.
+
+---
 
 ## Project Structure
 ```
@@ -29,7 +40,7 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   └── post_processing_real.py
 └── README.md                     # This file
 ```
-
+-----
 
 ## Installation
 1. Clone the repository:
@@ -45,6 +56,22 @@ This repository provides the full codebase and reproducible scripts for our Newt
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
+
+------
+## Quick Start (synthetic benchmark in 3 steps)
+```bash
+# 1  Clone & install
+git clone https://github.com/piotrmgs/puiseux-cvnn.git
+cd puiseux-cvnn
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# 2  Run the complete synthetic pipeline (≃ 30 s on CPU)
+python -m up_synth.up_synthetic
+
+# 3  Generate Newton-Puiseux analysis for uncertain points
+python -m post_processing_synth.post_processing_synth
+```
 
 ----------------------------------------------------------
 ## Usage
@@ -271,10 +298,19 @@ This script performs the following steps:
 - `post_processing_real/robustness_curves_point<idx>.png` — adversarial robustness plots.
 - `post_processing_real/contour_point<idx>_fix_dim=[...].png` — 2D decision boundary visualizations.
 
-
+---
 
 ## License
 This project is released under the MIT License. See [LICENSE](LICENSE) for details.
+
+
+---
+
+**MIT-BIH Arrhythmia Database**  
+ECG recordings are redistributed under the PhysioNet open-access license.  
+Please ensure compliance with the original terms: https://physionet.org/content/mitdb/1.0.0/
+
+---
 
 ## Contact
 For questions or contributions, please open an issue or contact Piotr Migus at migus.piotr@gmail.com.
