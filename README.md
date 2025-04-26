@@ -40,36 +40,32 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   └── post_processing_real.py
 └── README.md                     # This file
 ```
+
+## Dataset ⚠️
+
+**MIT-BIH Arrhythmia Database is *not* stored in this repository.**
+
 -----
 
 ## Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/piotrmgs/puiseux-cvnn.git
-   cd puiseux-cvnn
-   ```
+git clone https://github.com/piotrmgs/puiseux-cvnn.git
+cd puiseux-cvnn
+   ```   
 2. Create a virtual environment and install dependencies:
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # Linux/macOS
-   venv\Scripts\activate   # Windows
-   pip install --upgrade pip
-   pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate puiseux-cvnn
    ```
 
 ------
 ## Quick Start (synthetic benchmark in 3 steps)
 ```bash
-# 1  Clone & install
-git clone https://github.com/piotrmgs/puiseux-cvnn.git
-cd puiseux-cvnn
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-
-# 2  Run the complete synthetic pipeline (≃ 30 s on CPU)
+# 1  Run the complete synthetic pipeline (≃ 30 s on CPU)
 python -m up_synth.up_synthetic
 
-# 3  Generate Newton-Puiseux analysis for uncertain points
+# 2  Generate Newton-Puiseux analysis for uncertain points
 python -m post_processing_synth.post_processing_synth
 ```
 
