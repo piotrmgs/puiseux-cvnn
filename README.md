@@ -3,6 +3,9 @@
 ## About this repo
 This repository contains the complete, reproducible codebase that accompanies the paper *“Newton-Puiseux Analysis for Interpretability and Calibration of Complex-Valued Neural Networks”*.  
 
+[![arXiv](https://img.shields.io/badge/arXiv-2504.19176-b31b1b.svg)](https://arxiv.org/abs/2504.19176)
+
+
 https://arxiv.org/pdf/2504.19176
 
 It implements our end-to-end pipeline – from data preprocessing through CVNN training to Newton-Puiseux-based local analysis – for both a controlled synthetic benchmark and the MIT-BIH Arrhythmia corpus.
