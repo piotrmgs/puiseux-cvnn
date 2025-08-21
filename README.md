@@ -47,6 +47,8 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   └── up_radio.py
 ├── post_processing_real/         # Post‑processing for MIT‑BIH data
 │   └── post_processing_real.py
+├── post_processing_radio/        # Post‑processing for RadioML 2016.10A
+│   └── post_processing_radio.py
 └── README.md                     # This file
 ```
 
@@ -481,6 +483,100 @@ python -m post_processing_real.post_processing_real
   - `calibration_ci_report.txt` *(same name as above if present; latest run overwrites)*
 
 - **Branch multiplicity sensitivity**
+  - `branch_multiplicity_sensitivity.csv`
+ 
+
+### 9. Post‑Processing Radio Data (RadioML 2016.10A)
+
+This step mirrors the MIT‑BIH post‑processing but uses artifacts from the **RadioML** pipeline (Section 4). It performs local Newton–Puiseux analysis in **C²** (two complex features → 4 real inputs), robustness probes, LIME/SHAP explanations, calibration comparisons with 95% CIs (plus Wilcoxon and win‑rate), sensitivity summaries for (τ, δ), and resource benchmarking.
+
+**Prerequisites**
+
+- You have already run the RadioML pipeline (Section 4) and produced at least:
+  - `up_radio/best_model_full.pt`
+  - `up_radio/scaler_full.pkl`
+  - `up_radio/uncertain_full.csv`
+  - *(optional)* `up_radio/T_calib.pt` (if temperature scaling was used)
+  - *(optional)* `up_radio/sens_grid.csv`, `up_radio/cv_metrics_per_fold_multi.csv`
+- The RadioML dataset is available locally as described in **Datasets ⚠️** (place `RML2016.10a_dict.pkl` in `radio-data/`).
+
+**Run**
+
+```bash
+# From the repo root (module form)
+python -m post_processing_radio.post_processing_radio 
+```
+
+**What this does**
+
+1. **Load model & artifacts (C²)**  
+   Loads `best_model_full.pt` (infers in/hidden dims from weights), optional `T_calib.pt`, `scaler_full.pkl`, and uncertain anchors from `uncertain_full.csv`. Verifies the model’s first layer accepts 4‑real input (C²).
+
+2. **Background for LIME/SHAP**  
+   Rebuilds a background set from raw IQ windows using `prepare_complex_input(method='stft_stats')` to obtain C² features; applies the saved scaler for consistency.
+
+3. **(τ, δ) Sensitivity summary (if `sens_grid.csv` present)**  
+   Writes:
+   - `sensitivity_detailed.csv` (the full grid),
+   - `sensitivity_summary.txt` and `sensitivity_extra.txt` (aggregates, correlations, budget‑constrained best).
+
+4. **Calibration comparison with 95% CI**  
+   If `cv_metrics_per_fold_multi.csv` exists, compiles:
+   - `comparative_table.csv` (mean ± CI for ECE/NLL/Brier/Acc/AUC),
+   - `calibration_ci_report.txt` (human‑readable CI table),
+   - `calibration_stats_tests.csv` (pairwise Wilcoxon; skipped if SciPy missing),
+   - `calibration_winrate_vs_none.csv` (fold‑wise win‑rate vs **NONE**).
+
+5. **Per‑anchor local analysis (for each uncertain point)**  
+   - **Kink diagnostics** (modReLU neighborhood): non‑holomorphicity probe and kink fraction (skipped if no modReLU‑like activations).  
+   - **Robust local surrogate**: degree‑4 complex polynomial with outlier/weighting safeguards; reports kept ratio, cond(A), rank.  
+   - **Quality metrics**: RMSE, MAE, Pearson correlation, sign‑agreement vs the CVNN.  
+   - **Newton–Puiseux expansions + interpretation** for local branches.  
+   - **Robustness** along phase‑selected directions (class change & flip radius) with plots.  
+   - **LIME & SHAP** explanations on consistently scaled C² features.  
+   - **2D local contours** of the decision boundary for fixed dim pairs (1,3) and (0,2).  
+   - **Resource benchmark**: Puiseux pipeline vs gradient saliency (time/memory).
+
+6. **Calibration CI table (local 5‑fold on RadioML)**  
+   Builds per‑method mean ± 95% CI for `none`, `platt`, `isotonic`, `beta`, `vector`, `temperature` using raw model probabilities (T=None) as the baseline, with:
+   - `calibration_folds_raw.csv` (per‑fold values),
+   - `calibration_ci_table.csv` and `calibration_ci_report.txt` (summaries).
+
+7. **Branch‑multiplicity sensitivity**  
+   Saves `branch_multiplicity_sensitivity.csv` showing ECE sensitivity to multiplicity mis‑estimation (via `sweep_multiplicity_misestimation`).
+
+**Outputs (saved to `post_processing_radio/`)**
+
+- **Logs**
+  - `post_processing_radio.log`
+
+- **Sensitivity (τ, δ)**
+  - `sensitivity_detailed.csv`, `sensitivity_summary.txt`, `sensitivity_extra.txt`
+
+- **Calibration comparisons (from CV panel)**
+  - `comparative_table.csv`
+  - `calibration_ci_report.txt`
+  - `calibration_stats_tests.csv` *(if SciPy available)*
+  - `calibration_winrate_vs_none.csv`
+
+- **Per‑anchor artifacts** (for each point *i*)
+  - `benchmark_point<i>.txt`
+  - `robustness_curves_point<i>.png`
+  - `contour_point<i>_fix_dim=[1,3].png`, `contour_point<i>_fix_dim=[0,2].png`
+  - `kink_sweep_point<i>.csv`
+  - `resource_point<i>.txt`
+
+- **Aggregate summaries**
+  - `kink_summary.csv`, `kink_global_summary.txt`
+  - `resource_summary.csv`
+  - `local_fit_summary.csv`
+
+- **Calibration CI (local 5‑fold)**
+  - `calibration_folds_raw.csv`
+  - `calibration_ci_table.csv`
+  - `calibration_ci_report.txt`
+
+- **Branch multiplicity**
   - `branch_multiplicity_sensitivity.csv`
 
 ---
