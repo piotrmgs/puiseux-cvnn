@@ -1,156 +1,249 @@
 # Copyright (c) 2025 Piotr Migus
 # This code is licensed under the MIT License.
 # See the LICENSE file in the repository root for full license information.
+
+
 ############################################################
 # Experiment with a toy problem in C^2 (4-dimensional real space):
 #
-# 1) We load uncertain points from a CSV file (`uncertain_synthetic.csv`)
+# 1) Load uncertain points from a CSV file (`uncertain_synthetic.csv`)
 #    and a pretrained neural network model (`model_parameters.pt`).
 #
-# 2) For selected points, we build a local polynomial approximation `F`
+# 2) For selected points, build a local polynomial approximation `F`
 #    (difference of logit outputs) as a polynomial of degree ≥ 4
-#    in a 4D space: (Re(z1), Im(z1), Re(z2), Im(z2)).
+#    in a 4D space: (Re(z1), Re(z2), Im(z1), Im(z2)).
 #
-# 3) We apply the `compute_puiseux` function (from puis.py) to obtain
-#    local Puiseux expansions around these selected points.
+# 3) Apply `compute_puiseux` (from puis.py) to obtain local Puiseux
+#    expansions around those points.
 #
 # Notes:
-# - By default, we use degree=4 and n_samples=200, adjustable if needed.
-# - `F` is evaluated locally around `xstar` through random perturbations
-#   within the cube [-delta, delta]^4 in the real domain, and mapped to complex.
+# - Default degree=4 and n_samples=200 (configurable).
+# - `F` is evaluated locally around `xstar` via random perturbations
+#   inside the cube [-delta, delta]^4 in R^4 and mapped to C^2.
 ############################################################
 
+# --- Determinism: make runs reproducible ---
+import os as _os, random as _random, numpy as _np, torch as _torch
+_os.environ.setdefault("PYTHONHASHSEED", "12345")
+_random.seed(12345); _np.random.seed(12345)
+_torch.manual_seed(12345); _torch.cuda.manual_seed_all(12345)
+try:
+    _torch.backends.cudnn.deterministic = True
+    _torch.backends.cudnn.benchmark = False
+    _os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    if _torch.cuda.is_available():
+        _torch.backends.cuda.matmul.allow_tf32 = False
+        _torch.backends.cudnn.allow_tf32 = False
+    _torch.use_deterministic_algorithms(True)
+except Exception:
+    pass
+del _os, _random, _np, _torch
 
-import os
 import csv
-import torch
 import time
+import ast
 import numpy as np
 import sympy
-import matplotlib.pyplot as plt
-import scipy.linalg as la
-import random
+import torch
 from sympy import factor
 
-# For reproducibility: we fix random seeds in Python and NumPy
-random.seed(42)
-np.random.seed(42)
-
-# Importing our custom modules:
-#  - SimpleComplexNet (the complex-valued neural model),
-#  - complex_modulus_to_logits (function computing logit moduli),
-#  - puiseux_expansions (function performing local Puiseux expansions).
-from src.find_up_synthetic import SimpleComplexNet, complex_modulus_to_logits
+# Custom modules:
+#  - SimpleComplexNet (complex-valued neural model),
+#  - complex_modulus_to_logits (compute logit moduli),
+#  - puiseux_expansions (local Puiseux expansions).
+from src.find_up_synthetic import SimpleComplexNet, complex_modulus_to_logits  # noqa: F401
 from src.puiseux import puiseux_expansions
 
-def benchmark_local_poly_approx_and_puiseux(model, 
-                                            xstar, 
-                                            local_poly_func, 
-                                            puiseux_func, 
-                                            delta=0.01, 
-                                            degree=4, 
-                                            n_samples=200,
-                                            device='cpu',
-                                            do_factor=True,
-                                            do_simplify=True,
-                                            puiseux_prec=4):
-    """
-    Measures execution times of the following steps:
-      1) Sample generation and computation of f(x) = alpha_0(x) - alpha_1(x).
-      2) Polynomial fitting (least squares).
-      3) Optional sympy.factor and sympy.simplify.
-      4) Computation of Puiseux expansions.
 
-    Parameters:
+# ---------------------------------------------------------------------
+# 0) Kink / non-holomorphicity diagnostics
+# ---------------------------------------------------------------------
+def estimate_nonholomorphic_fraction(model, xstar, delta=0.01, n_samples=2000,
+                                     kink_eps=1e-6, device='cpu'):
+    """
+    Estimate the fraction of perturbations for which a 'kink' occurs in the first
+    layer (fc1 + modReLU):
+
+        shifted = sqrt(xr^2 + xi^2) + bias_modrelu  ≤  kink_eps
+
+    Parameters
     ----------
     model : torch.nn.Module
-        A trained model (e.g., SimpleComplexNet).
-    xstar : ndarray (4,)
-        A base point in R^4 = C^2.
-    local_poly_func : callable
-        A function of the form (model, xstar, delta, degree, n_samples, device) -> expr
-        (or similar),
-        which performs polynomial fitting in a neighborhood of xstar.
-    puiseux_func : callable
-        A function that takes an expression and returns a list of Puiseux expansions.
-    delta, degree, n_samples, device : as above.
-    do_factor : bool
-        Whether to apply sympy.factor to the polynomial.
-    do_simplify : bool
-        Whether to apply sympy.simplify.
-    remove_linear : bool
-        Whether to remove linear terms from the polynomial (if implemented).
-    puiseux_prec : int
-        Precision used for Puiseux expansions in puiseux_func.
+        CVNN with a first linear layer named `fc1` followed by modReLU-like nonlinearity.
+    xstar : array-like of shape (4,)
+        Base point in R^4 interpreted as (Re z1, Re z2, Im z1, Im z2).
+    delta : float
+        Side half-length of the sampling cube [-delta, delta]^4 around `xstar`.
+    n_samples : int
+        Number of random perturbations to evaluate.
+    kink_eps : float
+        Threshold for detecting proximity to the modReLU 'kink'.
+    device : {"cpu","cuda"} or torch.device
+        Torch device for evaluation.
 
-    Returns:
-    --------
-    times : dict
-        Dictionary with keys: 
-        'time_sampling', 'time_lstsq', 'time_factor', 'time_simplify', 'time_puiseux', 'time_total'
-    expr : sympy.Expr
-        The final polynomial (after optional factor and simplify).
-    expansions : list 
-        List of Puiseux expansions (from puiseux_func).
+    Returns
+    -------
+    dict
+        {'frac_kink', 'frac_active', 'frac_inactive', 'n_samples', 'kink_eps'}
     """
+    model.eval()
+    xstar = np.asarray(xstar, dtype=np.float32)
 
+    shifts = (2 * delta) * np.random.rand(n_samples, 4).astype(np.float32) - delta
+    X = xstar.reshape(1, 4) + shifts
+    X_t = torch.tensor(X, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        H = model.fc1(X_t)  # [N, 2*hidden]
+        half = H.size(1) // 2
+        xr, xi = H[:, :half], H[:, half:]
+        mag = torch.sqrt(torch.clamp(xr**2 + xi**2, min=1e-12))
+        bias = getattr(model, "bias_modrelu", 0.0)
+        if not isinstance(bias, torch.Tensor):
+            bias = torch.tensor(bias, device=mag.device)
+        shifted = mag + bias
+
+        kink_mask = (shifted <= float(kink_eps))
+        any_kink = kink_mask.any(dim=1)
+        frac = float(any_kink.float().mean().item())
+
+        active_mask = (shifted > 0)
+        frac_active = float(active_mask.float().mean().item())
+        frac_inactive = float((~active_mask).float().mean().item())
+
+    return {
+        "frac_kink": frac,
+        "frac_active": frac_active,
+        "frac_inactive": frac_inactive,
+        "n_samples": int(n_samples),
+        "kink_eps": float(kink_eps),
+    }
+
+
+# ---------------------------------------------------------------------
+# 1) Benchmark: local polynomial + Puiseux (with timing)
+# ---------------------------------------------------------------------
+def benchmark_local_poly_approx_and_puiseux(
+    model,
+    xstar,
+    local_poly_func,
+    puiseux_func,
+    delta=0.01,
+    degree=4,
+    n_samples=200,
+    device='cpu',
+    do_factor=True,
+    do_simplify=True,
+    puiseux_prec=4
+):
+    """
+    Time the main stages:
+      - local sampling and LSQ fit (via `local_poly_func`)
+      - optional factor/simplify of the symbolic polynomial
+      - Puiseux expansions (via `puiseux_func`)
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+    xstar : array-like (4,)
+        Base point in R^4.
+    local_poly_func : callable
+        Function building the local polynomial; must accept
+        (model, xstar, delta, degree, n_samples, device, return_diag=True)
+        and return (expr, diag).
+    puiseux_func : callable
+        Function computing Puiseux expansions: (expr, x, y, prec) -> expansions.
+    delta, degree, n_samples, device : see local_poly_func
+    do_factor, do_simplify : bool
+        Apply `sympy.factor` / `sympy.simplify` before Puiseux.
+    puiseux_prec : int
+        Expansion precision passed to `puiseux_func`.
+
+    Returns
+    -------
+    times : dict
+        Stage timings and resource snapshots.
+    expr : sympy.Expr
+        (Optionally simplified/factored) polynomial.
+    expansions : Any
+        Return value of `puiseux_func`.
+    """
     x, y = sympy.symbols('x y')
-    I = sympy.I
 
-    # Measure total execution time
+    # Reset GPU peak stats & sync before timing (if applicable)
+    dev = torch.device(device) if not isinstance(device, torch.device) else device
+    if torch.cuda.is_available() and dev.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(dev)
+        torch.cuda.synchronize()
+
     t0 = time.time()
 
-    # 1) Sampling and function evaluation
-    tA0 = time.time()
-    # Sampling can be done externally or within `local_poly_func`. 
-    # Here, we assume sampling is handled by `local_poly_func`.
-    tA1 = time.time()
-    time_sampling = tA1 - tA0
+    # 1) Local polynomial + diagnostics (sampling and fit timings)
+    expr, diag = local_poly_func(
+        model=model,
+        xstar=xstar,
+        delta=delta,
+        degree=degree,
+        n_samples=n_samples,
+        device=device,
+        return_diag=True
+    )
 
-    # 2) Polynomial fitting (least squares)
-    tB0 = time.time()
-    expr = local_poly_func(model=model,
-                           xstar=xstar,
-                           delta=delta,
-                           degree=degree,
-                           n_samples=n_samples,
-                           device=device)
-    tB1 = time.time()
-    time_lstsq = tB1 - tB0
+    if torch.cuda.is_available() and dev.type == "cuda":
+        torch.cuda.synchronize()
+    time_sampling = diag.get("time_sampling", float("nan"))
+    time_lstsq = diag.get("time_fit", float("nan"))
 
-    # 3) Factor and simplify polynomial (optional)
+    # 2) Optional factor/simplify
     time_factor = 0.0
     time_simplify = 0.0
     if do_factor:
         tf0 = time.time()
         expr = sympy.factor(expr)
-        tf1 = time.time()
-        time_factor = tf1 - tf0
-    
+        if torch.cuda.is_available() and dev.type == "cuda":
+            torch.cuda.synchronize()
+        time_factor = time.time() - tf0
     if do_simplify:
         ts0 = time.time()
         expr = sympy.simplify(expr)
-        ts1 = time.time()
-        time_simplify = ts1 - ts0
+        if torch.cuda.is_available() and dev.type == "cuda":
+            torch.cuda.synchronize()
+        time_simplify = time.time() - ts0
 
-    # 4) Puiseux expansions computation
-    tC0 = time.time()
-    expansions = puiseux_expansions(expr,x, y, puiseux_prec)
-    tC1 = time.time()
-    time_puiseux = tC1 - tC0
+    # 3) Puiseux expansions
+    tp0 = time.time()
+    expansions = puiseux_func(expr, x, y, puiseux_prec)
+    if torch.cuda.is_available() and dev.type == "cuda":
+        torch.cuda.synchronize()
+    time_puiseux = time.time() - tp0
 
     time_total = time.time() - t0
 
+    # Resource snapshot
+    try:
+        import psutil, os
+        cpu_rss_mb = float(psutil.Process(os.getpid()).memory_info().rss / (1024**2))
+    except Exception:
+        cpu_rss_mb = float('nan')
+    gpu_peak_mb = (float(torch.cuda.max_memory_allocated(dev) / (1024**2))
+                   if torch.cuda.is_available() and dev.type == "cuda" else float('nan'))
+
     times = {
-        'time_sampling': time_sampling,
-        'time_lstsq': time_lstsq,
-        'time_factor': time_factor,
-        'time_simplify': time_simplify,
-        'time_puiseux': time_puiseux,
-        'time_total': time_total
+        'time_sampling': float(time_sampling),
+        'time_lstsq': float(time_lstsq),
+        'time_factor': float(time_factor),
+        'time_simplify': float(time_simplify),
+        'time_puiseux': float(time_puiseux),
+        'time_total': float(time_total),
+        'cpu_rss_mb': cpu_rss_mb,
+        'gpu_peak_mb': gpu_peak_mb,
     }
     return times, expr, expansions
 
+
+# ---------------------------------------------------------------------
+# 2) Approximation quality (fast version via lambdify)
+# ---------------------------------------------------------------------
 def evaluate_poly_approx_quality(model,
                                  poly_expr,
                                  xstar,
@@ -161,120 +254,70 @@ def evaluate_poly_approx_quality(model,
     Evaluate the quality of polynomial approximation (`poly_expr`) against
     the true function f(x) = alpha_0(x) - alpha_1(x) locally around `xstar`.
 
-    Parameters:
-    ----------
-    model : nn.Module
-        Trained neural model (e.g., SimpleComplexNet).
-    poly_expr : sympy.Expr
-        Local polynomial in variables (x, y), where:
-        - x corresponds to z1 - z1*
-        - y corresponds to z2 - z2*
-        and (z1 = x1 + i*x3, z2 = x2 + i*x4).
-        Assumption: poly_expr(0,0)=0 (already aligned).
-    xstar : np.ndarray, shape (4,)
-        Base point coordinates in (Re(z1), Re(z2), Im(z1), Im(z2)).
-    delta : float
-        Perturbation range for each of the 4 coordinates.
-    n_samples : int
-        Number of samples used to estimate approximation quality.
-    device : str or torch.device
-        'cpu' or 'cuda'.
-
-    Returns:
+    Returns
     -------
-    metrics : dict
-        Dictionary containing keys:
-        'RMSE', 'MAE', 'corr_pearson', 'sign_agreement'
+    dict
+        {'RMSE', 'MAE', 'corr_pearson', 'sign_agreement'}.
     """
-
     x_sym, y_sym = sympy.symbols('x y')
+    f_num = sympy.lambdify((x_sym, y_sym), poly_expr, modules=["numpy"])
 
-    # Zapisujemy z1*, z2* w formie zespolonej
-    z1_star = xstar[0] + 1j*xstar[2]
-    z2_star = xstar[1] + 1j*xstar[3]
+    z1_star = xstar[0] + 1j * xstar[2]
+    z2_star = xstar[1] + 1j * xstar[3]
 
-    # Losowo generujemy punkty w otoczeniu
-    all_shifts = (2 * delta) * np.random.rand(n_samples, 4) - delta
-    # Będziemy zapisywać wyniki w listach
-    fvals_list = []
-    pvals_list = []
+    shifts = (2 * delta) * np.random.rand(n_samples, 4) - delta
+    fvals_list, pvals_list = [], []
 
-    for shift in all_shifts:
+    for shift in shifts:
         x_loc = xstar + shift
-        # 1) Oblicz f(x_loc):
+        # 1) f(x)
         x_ten = torch.tensor(x_loc, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            out = model(x_ten)  # shape (1,4)
+            out = model(x_ten)
             half = out.shape[1] // 2
-            xr = out[:, :half]
-            xi = out[:, half:]
+            xr, xi = out[:, :half], out[:, half:]
             alpha = torch.sqrt(xr**2 + xi**2 + 1e-9)
             f_val = (alpha[:, 0] - alpha[:, 1]).item()
         fvals_list.append(f_val)
 
-        # 2) Oblicz p(x_loc):
-        #    Zamieniamy x_loc na z1, z2 -> z1 = x1 + i*x3, z2 = x2 + i*x4
-        z1 = (x_loc[0] + 1j*x_loc[2]) - z1_star  # "local shift"
-        z2 = (x_loc[1] + 1j*x_loc[3]) - z2_star
-        # Substitujemy do expr
-        p_val = poly_expr.subs({x_sym: z1, y_sym: z2})
-        # Możliwe, że p_val może być zespolone, bierzemy np. część rzeczywistą:
-        # ale jeśli ten wielomian jest realny, to i p_val powinno być (prawie) real.
-        # Dla bezpieczeństwa:
-        p_val = complex(p_val)
-        #p_val_float=float(p_val)
-        pvals_list.append(p_val.real)  # realna część
+        # 2) p(x) — local shift then lambdify evaluation
+        z1 = (x_loc[0] + 1j * x_loc[2]) - z1_star
+        z2 = (x_loc[1] + 1j * x_loc[3]) - z2_star
+        p_val = f_num(z1, z2)
+        pvals_list.append(np.real(p_val))
 
-    # Konwertujemy na tablice numpy
     fvals_arr = np.array(fvals_list)
     pvals_arr = np.array(pvals_list)
 
-    # Policzmy podstawowe metryki:
-    # RMSE
     rmse = np.sqrt(np.mean((pvals_arr - fvals_arr) ** 2))
-    # MAE
     mae = np.mean(np.abs(pvals_arr - fvals_arr))
-    # Korelacja Pearson
-    #   Tylko gdy wariancja niezerowa
-    corr = np.corrcoef(fvals_arr, pvals_arr)[0, 1] if np.std(pvals_arr)*np.std(fvals_arr) > 1e-12 else 0.0
-    # Zgodność znaku
-    sign_f = (fvals_arr > 0).astype(int)
-    sign_p = (pvals_arr > 0).astype(int)
-    sign_agreement = np.mean(sign_f == sign_p)
+    corr = (np.corrcoef(fvals_arr, pvals_arr)[0, 1]
+            if np.std(pvals_arr) * np.std(fvals_arr) > 1e-12 else 0.0)
+    sign_agreement = np.mean((fvals_arr > 0) == (pvals_arr > 0))
 
-    metrics = {
-        'RMSE': rmse,
-        'MAE': mae,
-        'corr_pearson': corr,
-        'sign_agreement': sign_agreement
+    return {
+        'RMSE': float(rmse),
+        'MAE': float(mae),
+        'corr_pearson': float(corr),
+        'sign_agreement': float(sign_agreement),
     }
-    return metrics
 
 
+# ---------------------------------------------------------------------
+# 3) Polynomial feature builder (optional helper)
+# ---------------------------------------------------------------------
 def polynomial_features_complex(z, degree=4, remove_linear=False):
     """
-    Construct polynomial features for a complex-valued bivariate input.
-
-    This function computes a list of monomials of the form z1^i * z2^j for an input complex pair z = (z1, z2),
-    with non-negative integers i and j that satisfy i + j ≤ degree. Optionally, if the remove_linear flag is set,
-    features corresponding to monomials with a total degree less than 2 (i.e., both constant and first-order terms)
-    are omitted from the output.
+    Return a list of monomials z1^i * z2^j for i + j ≤ degree.
 
     Parameters
     ----------
-    z : tuple of complex numbers
-        A tuple (z1, z2) containing two complex numbers for which the polynomial features are evaluated.
-    degree : int, optional
-        The maximum allowable total degree for the generated monomials (i + j ≤ degree). Default is 4.
-    remove_linear : bool, optional
-        When True, omits all monomials whose total degree is less than 2 (i.e., skips both the constant term and
-        linear terms). Default is False.
-
-    Returns
-    -------
-    list
-        A list of complex values, each corresponding to a monomial z1^i * z2^j for all valid exponent pairs (i, j)
-        that satisfy i + j ≤ degree, with the optional exclusion of features having i + j < 2 if remove_linear is True.
+    z : tuple (z1, z2)
+        Complex variables.
+    degree : int
+        Maximum total degree.
+    remove_linear : bool
+        If True, remove constant and linear terms (keep only total degree ≥ 2).
     """
     x, y = z
     feats = []
@@ -286,51 +329,53 @@ def polynomial_features_complex(z, degree=4, remove_linear=False):
     return feats
 
 
-def fit_polynomial_complex(z_vals, Fvals, degree=4, remove_linear=False):
+# ---------------------------------------------------------------------
+# 4) LSQ in C^2: WLS + Tikhonov (ridge) + conditioning/residual diagnostics
+# ---------------------------------------------------------------------
+# (duplicated banner kept intentionally for parity with the original notes)
+def fit_polynomial_complex(z_vals, Fvals, degree=4, remove_linear=False,
+                           weights=None, ridge=1e-8):
     """
-    Fit a bivariate polynomial in complex variables via least squares optimization.
+    Fit a polynomial in C^2 using weighted least squares (WLS) with Tikhonov (ridge).
 
-    This function constructs and fits a polynomial in two complex variables, z1 and z2,
-    by solving a linear least-squares problem. It is assumed that the input coordinate
-    pairs (z1, z2) have been translated such that the center of interest is at the origin (0,0).
-    The goal is to approximate a function F(z1, z2) – which may be either real or complex –
-    by a polynomial model.
+    Parameters
+    ----------
+    z_vals : list[tuple(complex, complex)]
+        Sampled local offsets (z1, z2) relative to the base point.
+    Fvals : array-like of complex
+        Target values F(z1, z2) for each sample.
+    degree : int
+        Maximum total degree i + j ≤ degree.
+    remove_linear : bool
+        If True, remove constant and linear terms from the basis.
+    weights : array-like or None
+        Optional positive weights; rows are scaled by sqrt(w).
+    ridge : float
+        Ridge strength; if > 0, augments normal equations with sqrt(ridge) * I.
 
-    The polynomial is built from all monomials of the form z1^i * z2^j that satisfy i + j ≤ degree.
-    Optionally, if the flag `remove_linear` is True, monomials with total degree less than 2 
-    (i.e., constant and first-order terms) are omitted, thereby emphasizing higher-order contributions.
+    Returns
+    -------
+    coeffs : np.ndarray (complex)
+        Fitted coefficients aligned with the constructed monomial basis.
+    expr : sympy.Expr
+        Symbolic polynomial (factored), simplified and shifted so that P(0,0)=0
+        is enforced downstream by the caller when needed.
+    info_dict : dict
+        {
+          'cond'      : condition number of A,
+          'rank'      : rank(A),
+          'n_monos'   : number of monomials,
+          'resid_mean': mean |residual|,
+          'resid_std' : std  |residual|,
+          'resid_skew': skewness of |residual|,
+          'resid_kurt': excess kurtosis of |residual|
+        }
 
-    The polynomial coefficients are determined by solving an overdetermined complex linear system
-    via least-squares. The function assesses the conditioning of the design matrix and prints warnings
-    if the matrix is ill-conditioned (condition number > 1e8) or if it is rank-deficient,
-    which may signal potential overfitting or numerical instability.
-
-    Parameters:
-    -----------
-    z_vals : list of tuple
-        A list of tuples, where each tuple (z1, z2) consists of complex numbers representing the 
-        shifted coordinates with respect to the origin.
-    Fvals : list or array-like
-        An array-like structure containing the function values corresponding to each coordinate pair.
-        The values may be real or complex (e.g., representing differences between logit outputs).
-    degree : int, optional
-        The maximum total degree (i.e., i+j) for the polynomial terms to be included in the model 
-        (default is 4).
-    remove_linear : bool, optional
-        If True, excludes all monomials with total degree less than 2 (i.e., omits the constant 
-        and linear terms), thereby focusing the fit on higher-order interactions (default is False).
-
-    Returns:
-    --------
-    coeffs : numpy.ndarray
-        A one-dimensional numpy array of complex coefficients corresponding to the fitted polynomial.
-        The ordering of the coefficients matches the order of the monomials generated during the feature
-        matrix construction.
-    expr_sym : sympy.Expr
-        A sympy expression representing the factorized form of the fitted polynomial in the symbolic
-        variables x and y, which correspond to z1 and z2, respectively.
+    Notes
+    -----
+    - Issues a console warning if A is ill-conditioned or rank-deficient.
     """
-    # Build the feature matrix (complex):
+    # Design matrix
     matA = []
     monomials = None
     for z in z_vals:
@@ -345,65 +390,97 @@ def fit_polynomial_complex(z_vals, Fvals, degree=4, remove_linear=False):
         if monomials is None:
             monomials = current_monos
         matA.append(feats)
-    matA = np.array(matA, dtype=np.complex128)
-    Fvals = np.array(Fvals, dtype=np.complex128)
-    
-    # Solve by complex least squares
-    coeffs, residuals, rank, s = np.linalg.lstsq(matA, Fvals, rcond=None)
-    
-    # Compute the condition number for stability check
-    condA = np.linalg.cond(matA)
+
+    A = np.asarray(matA, dtype=np.complex128)
+    b = np.asarray(Fvals, dtype=np.complex128)
+
+    # Weights (WLS)
+    if weights is not None:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        w = np.clip(w, 1e-8, np.inf)
+        sw = np.sqrt(w)
+        A = (sw[:, None] * A)
+        b = (sw * b)
+
+    # Ridge: [A; sqrt(lambda) I], [b; 0]
+    n_cols = A.shape[1] if A.ndim == 2 else 0
+    if ridge and ridge > 0 and n_cols > 0:
+        Ar = np.vstack([A, np.sqrt(ridge) * np.eye(n_cols, dtype=np.complex128)])
+        br = np.concatenate([b, np.zeros(n_cols, dtype=np.complex128)])
+    else:
+        Ar, br = A, b
+
+    coeffs, _, rank_aug, s_aug = np.linalg.lstsq(Ar, br, rcond=None)
+
+    # Conditioning and rank diagnostics on the original A
+    condA = (np.linalg.cond(A) if A.size > 0 else np.inf)
+    rankA = (np.linalg.matrix_rank(A) if A.size > 0 else 0)
     if condA > 1e8:
-        print(f"[WARN] The condition number is large: {condA:.2e}. Fit may be unstable (degree={degree}).")
+        print(f"[WARN] Condition number is large: {condA:.2e}. Fit may be unstable (degree={degree}).")
+    if rankA < n_cols:
+        print(f"[WARN] Rank-deficient system: rank(A)={rankA} < {n_cols} monomials. Potential over/underfitting.")
 
-    # Check rank deficiency
-    if rank < matA.shape[1]:
-        print(f"[WARN] Rank-deficient system: rank={rank} < {matA.shape[1]} monomials. "
-              f"Potential overfitting or nearly singular matrix.")
+    # Residual diagnostics (on the weighted A if weights were applied)
+    try:
+        b_hat = A @ coeffs[:A.shape[1]]
+        r = b - b_hat
+        r_abs = np.abs(r)
+        resid_mean = float(np.mean(r_abs)) if r_abs.size else float('nan')
+        resid_std  = float(np.std(r_abs, ddof=1)) if r_abs.size > 1 else 0.0
+        if r_abs.size >= 3:
+            m = np.mean(r_abs); s = np.std(r_abs, ddof=1) + 1e-12
+            resid_skew = float(np.mean(((r_abs - m)/s)**3))
+            resid_kurt = float(np.mean(((r_abs - m)/s)**4) - 3.0)
+        else:
+            resid_skew, resid_kurt = float('nan'), float('nan')
+    except Exception:
+        resid_mean = float('nan'); resid_std = float('nan')
+        resid_skew = float('nan'); resid_kurt = float('nan')
 
-    
-
-    # Build the sympy expression in x, y
+    # Assemble symbolic polynomial
     x, y = sympy.symbols('x y')
     expr = 0
-    #idx = 0
     for idx, (i, j) in enumerate(monomials):
         expr += coeffs[idx] * x**i * y**j
     expr = sympy.simplify(expr)
-    return coeffs, factor(expr)
+
+    info_dict = dict(
+        cond=float(condA),
+        rank=int(rankA),
+        n_monos=int(len(monomials)),
+        resid_mean=resid_mean,
+        resid_std=resid_std,
+        resid_skew=resid_skew,
+        resid_kurt=resid_kurt
+    )
+    return coeffs, factor(expr), info_dict
 
 
+# ---------------------------------------------------------------------
+# 5) Load uncertain points (safe list parser)
+# ---------------------------------------------------------------------
 def load_uncertain_points(csv_path):
     """
-    Load a CSV file containing uncertain points. Each row is expected to have:
-      - 'index'
-      - 'X' : a list of 4 floats (Re(z1), Im(z1), Re(z2), Im(z2)) inside brackets
-      - 'true_label'
-      - 'p1', 'p2' : probabilities or any other confidence measure.
+    Load uncertain samples from CSV.
 
-    Example of a row's 'X': "[ 1.2, 0.2, -0.3, 0.8 ]"
+    Expected columns
+    ----------------
+    'index' : int
+    'X'     : stringified Python list with 4 floats
+    'true_label' : int
+    'p1', 'p2'   : float probabilities for the two classes
 
-    Parameters:
-    -----------
-    csv_path : str
-        Path to the CSV file with uncertain points.
-
-    Returns:
-    --------
-    up_list : list of dict
-        Each dict has keys:
-          'index' : int,
-          'X' : [re(z1), im(z1), re(z2), im(z2)],
-          'true_label' : int,
-          'p1' : float,
-          'p2' : float
+    Returns
+    -------
+    list[dict]
+        Each dict contains {'index','X','true_label','p1','p2'} with X as a list of 4 floats.
     """
     up_list = []
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            X_str = row['X'].strip('[]')
-            X_vals = [float(x) for x in X_str.split(',')]
+            vals = ast.literal_eval(row['X'])
+            X_vals = [float(v) for v in vals]
             if len(X_vals) != 4:
                 raise ValueError(f"Expected 4 real dims in 'X', got {len(X_vals)}")
 
@@ -418,120 +495,232 @@ def load_uncertain_points(csv_path):
     return up_list
 
 
-def local_poly_approx_complex(model, xstar, delta=0.01, degree=4, n_samples=2000, device='cpu', remove_linear=True):
+# ---------------------------------------------------------------------
+# 6) Local polynomial (kink-robust): filtering, weights, retries, degree fallback
+# ---------------------------------------------------------------------
+# (duplicated banner kept intentionally for parity with the original notes)
+def local_poly_approx_complex(
+    model,
+    xstar,
+    delta=0.01,
+    degree=4,
+    n_samples=2000,
+    device='cpu',
+    remove_linear=True,
+    exclude_kink_eps=1e-6,
+    weight_by_distance=True,
+    return_diag=False,
+    min_keep_ratio=0.25,
+    max_retries=1,
+    ridge=1e-8,
+):
     """
-    Construct a local complex polynomial approximation of F = (logit1 - logit2) around a given 4D point.
-    
-    The base point xstar is expressed as [Re(z1), Re(z2), Im(z1), Im(z2)], so that the complex variables are:
-         z1 = xstar[0] + i*xstar[2]    and    z2 = xstar[1] + i*xstar[3].
-         
-    The approximation is obtained by:
-      1) Generating n_samples random perturbations in [-delta, delta]^4.
-      2) Converting each perturbed 4D point to complex coordinates.
-      3) Evaluating F via the provided model.
-      4) Fitting a polynomial of total degree ≤ degree in (z1, z2) using least squares (optionally omitting constant 
-         and linear terms if remove_linear is True).
-      5) Adjusting the fitted polynomial so that it vanishes at the base point (P(0,0)=0 when shift_to_zero is True).
-    
-    Parameters:
-    -----------
+    Build a local polynomial F = (|c1| - |c2|) around `xstar` in C^2.
+
+    Robustness tricks:
+    - `exclude_kink_eps`: drop samples near modReLU kinks in fc1 (|z| + b <= eps).
+    - `weight_by_distance`: row weights ~ min(shifted) so samples farther from kinks get more weight.
+    - `retry`: if too few clean samples, re-sample in a smaller cube and augment.
+    - degree fallback: iteratively decrease the degree until rank/conditioning are stable.
+
+    Parameters
+    ----------
     model : torch.nn.Module
-        A trained complex-valued neural network (e.g., SimpleComplexNet).
-    xstar : numpy.ndarray, shape (4,)
-        Base point specified as [Re(z1), Re(z2), Im(z1), Im(z2)].
+    xstar : array-like (4,)
+        Base point in R^4.
     delta : float
-        Half-width for uniform random perturbations along each dimension.
+        Side half-length of the initial sampling cube.
     degree : int
-        Maximum total degree for polynomial terms.
+        Initial max total degree; may be reduced if the system is unstable.
     n_samples : int
-        Number of samples generated for the least-squares fit.
-    device : str or torch.device
-        Device for PyTorch computations (e.g., 'cpu' or 'cuda').
-    remove_linear : bool, optional
-        If True, omits constant and linear terms from the polynomial fit (default True).
-    shift_to_zero : bool, optional
-        If True, shifts complex samples so that the base point maps to (0,0) and forces P(0,0)=0 (default True).
-    
-    Returns:
-    --------
-    expr : sympy.Expr
-        A sympy expression in variables x and y representing the normalized local polynomial approximation of F.
-    """
-    x_star = xstar[0] + 1j * xstar[2]
-    y_star = xstar[1] + 1j * xstar[3]
-    
-    z_samples = []
-    Fvals = []
-    for _ in range(n_samples):
-        shift = (2 * delta) * np.random.rand(4) - delta
-        x_loc = xstar + shift
-        
-        # Convert real data to complex z1, z2
-        x = x_loc[0] + 1j * x_loc[2]
-        y = x_loc[1] + 1j * x_loc[3]
-        z_samples.append((x - x_star, y - y_star))
+        Number of initial perturbations.
+    device : {"cpu","cuda"} or torch.device
+    remove_linear : bool
+        Remove constant/linear monomials from the basis (focus on non-linear terms).
+    exclude_kink_eps : float
+        Threshold for detecting and excluding kink-near samples.
+    weight_by_distance : bool
+        If True, use min(shifted) as WLS weights (favoring points farther from kinks).
+    return_diag : bool
+        If True, return (expr, diagnostics_dict); otherwise return expr only.
+    min_keep_ratio : float
+        Minimum fraction of kept samples; otherwise perform a retry in a smaller cube.
+    max_retries : int
+        Number of retries with a smaller cube if keep ratio is too low.
+    ridge : float
+        Tikhonov regularization strength for LSQ.
 
-        # Evaluate F at x_loc using the model
-        XY = torch.tensor(x_loc, dtype=torch.float32).unsqueeze(0).to(device)
-        with torch.no_grad():
-            out = model(XY)  # shape (1, 2*out_features)
-            half = out.shape[1] // 2
-            xr = out[:, :half]
-            xi = out[:, half:]
-            alpha = torch.sqrt(xr**2 + xi**2 + 1e-9)
-            F_val = alpha[:, 0] - alpha[:, 1]
-            F_val = F_val.item()
-        Fvals.append(F_val)
-    
-    # Fit polynomial in complex variables (z1,z2)
-    coeffs, expr = fit_polynomial_complex(z_samples, Fvals, degree=degree, remove_linear=remove_linear)
-    
-    # Enforce P(0,0)=0 by subtracting constant offset
+    Returns
+    -------
+    sympy.Expr or (sympy.Expr, dict)
+        Local polynomial (shifted so that P(0,0)=0) and diagnostics if requested.
+    """
+    t0 = time.time()
+    model.eval()
+    xstar = np.asarray(xstar, dtype=np.float32)
     x_sym, y_sym = sympy.symbols('x y')
-    
+
+    # 1) Sample perturbations around xstar
+    shifts = (2 * delta) * np.random.rand(n_samples, 4).astype(np.float32) - delta
+    X_loc = xstar.reshape(1, 4) + shifts
+    X_t = torch.tensor(X_loc, dtype=torch.float32, device=device)
+
+    # 2) Forward pass: compute F and kink mask in fc1
+    with torch.no_grad():
+        out = model(X_t)  # [N, 2*out_features]
+        half = out.shape[1] // 2
+        xr, xi = out[:, :half], out[:, half:]
+        alpha = torch.sqrt(torch.clamp(xr**2 + xi**2, min=1e-9))
+        Fvals = (alpha[:, 0] - alpha[:, 1]).cpu().numpy()
+
+        H = model.fc1(X_t)  # [N, 2*hidden]
+        hhalf = H.size(1) // 2
+        hr, hi = H[:, :hhalf], H[:, hhalf:]
+        mag = torch.sqrt(torch.clamp(hr**2 + hi**2, min=1e-12))
+        bias = getattr(model, "bias_modrelu", 0.0)
+        if not isinstance(bias, torch.Tensor):
+            bias = torch.tensor(bias, device=mag.device)
+        shifted = mag + bias  # kink if <= 0
+
+    time_sampling = time.time() - t0
+
+    # 3) Map to local complex offsets (z1, z2) relative to xstar
+    z1_star = xstar[0] + 1j * xstar[2]
+    z2_star = xstar[1] + 1j * xstar[3]
+    z_samps = []
+    for p in X_loc:
+        z1 = (p[0] + 1j * p[2]) - z1_star
+        z2 = (p[1] + 1j * p[3]) - z2_star
+        z_samps.append((z1, z2))
+
+    # 4) Filter by kink proximity; construct weights
+    kink_eps = float(exclude_kink_eps)
+    mask_kink_any = (shifted <= kink_eps).any(dim=1).cpu().numpy()
+    keep = ~mask_kink_any
+    z_kept = [z for z, m in zip(z_samps, keep) if m]
+    F_kept = [f for f, m in zip(Fvals, keep) if m]
+
+    if weight_by_distance:
+        min_shift = shifted.min(dim=1).values.cpu().numpy()
+        w_all = np.maximum(min_shift, 0.0) + 1e-9
+        w_kept = [w for w, m in zip(w_all, keep) if m]
+    else:
+        w_kept = None
+
+    # Retry in a smaller cube if too few clean samples remain
+    attempt = 0
+    while (len(z_kept) < 10 or (len(z_kept) / max(n_samples, 1)) < min_keep_ratio) and attempt < max_retries:
+        attempt += 1
+        shifts2 = (2 * (0.5 * delta)) * np.random.rand(n_samples, 4).astype(np.float32) - (0.5 * delta)
+        X_loc2 = xstar.reshape(1, 4) + shifts2
+        X_t2 = torch.tensor(X_loc2, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            H2 = model.fc1(X_t2)
+            hhalf2 = H2.size(1) // 2
+            hr2, hi2 = H2[:, :hhalf2], H2[:, hhalf2:]
+            mag2 = torch.sqrt(torch.clamp(hr2**2 + hi2**2, min=1e-12))
+            shifted2 = mag2 + bias
+            out2 = model(X_t2)
+            half2 = out2.shape[1] // 2
+            xr2, xi2 = out2[:, :half2], out2[:, half2:]
+            alpha2 = torch.sqrt(torch.clamp(xr2**2 + xi2**2, min=1e-9))
+            Fvals2 = (alpha2[:, 0] - alpha2[:, 1]).cpu().numpy()
+        mask2 = (shifted2 <= kink_eps).any(dim=1).cpu().numpy()
+        keep2 = ~mask2
+        for p, f, m in zip(X_loc2, Fvals2, keep2):
+            if m:
+                z1 = (p[0] + 1j * p[2]) - z1_star
+                z2 = (p[1] + 1j * p[3]) - z2_star
+                z_kept.append((z1, z2))
+                F_kept.append(f)
+        if weight_by_distance:
+            min_shift2 = shifted2.min(dim=1).values.cpu().numpy()
+            w_kept += [w for w, m in zip(np.maximum(min_shift2, 0.0) + 1e-9, keep2) if m]
+
+    kept_ratio = float(len(F_kept) / max(n_samples, 1))
+
+    # 5) Fit (WLS + ridge) with degree fallback until stable rank/conditioning
+    t1 = time.time()
+    expr = None
+    info = {}
+    used_degree = int(degree)
+    # Try from 'degree' down to 2
+    for d in range(int(degree), 1, -1):
+        _, expr_try, info_try = fit_polynomial_complex(
+            z_kept, F_kept, degree=d, remove_linear=remove_linear, weights=w_kept, ridge=ridge
+        )
+        stable = (info_try.get("rank", 0) == info_try.get("n_monos", 0)) and (info_try.get("cond", np.inf) < 1e10)
+        # Initialize or accept stable solution
+        if expr is None:
+            expr, info, used_degree = expr_try, info_try, d
+        if stable:
+            expr, info, used_degree = expr_try, info_try, d
+            break
+        # If still unstable — keep the better-conditioned candidate
+        if info_try.get("cond", np.inf) < info.get("cond", np.inf):
+            expr, info, used_degree = expr_try, info_try, d
+
+    # Enforce P(0,0)=0 (shift constant term)
     expr = sympy.simplify(expr - expr.subs({x_sym: 0, y_sym: 0}))
+    time_fit = time.time() - t1
 
-    return expr
+    diag = {
+        "time_sampling": float(time_sampling),
+        "time_fit": float(time_fit),
+        "n_total": int(n_samples),
+        "n_kept": int(len(F_kept)),
+        "kept_ratio": kept_ratio,
+        "cond": info.get("cond", float("nan")),
+        "rank": info.get("rank", -1),
+        "n_monomials": info.get("n_monos", -1),
+        "kink_eps": float(kink_eps),
+        "degree_used": int(used_degree),
+        "retry": int(attempt),
+        # Residual diagnostics from LSQ
+        "resid_mean": info.get("resid_mean", float("nan")),
+        "resid_std": info.get("resid_std", float("nan")),
+        "resid_skew": info.get("resid_skew", float("nan")),
+        "resid_kurt": info.get("resid_kurt", float("nan")),
+    }
+    return (expr, diag) if return_diag else expr
 
 
-def puiseux_uncertain_point(F_hat_expr,prec=4, base_point=None):
+# ---------------------------------------------------------------------
+# 7) Puiseux expansions with optional shift to (z1*, z2*)
+# ---------------------------------------------------------------------
+def puiseux_uncertain_point(F_hat_expr, prec=4, base_point=None):
     """
-    Compute Newton-Puiseux expansions for a given local polynomial expression
-    F_hat_expr in two variables (x, y). Save the expansions to a text file
-    and return them as a list of strings.
+    Compute Newton–Puiseux expansions for F_hat_expr(x,y).
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     F_hat_expr : sympy.Expr
-        The local polynomial approximation in x, y (complex variables).
+        Local polynomial in the shifted coordinates (x = z1 - z1*, y = z2 - z2*).
     prec : int
-        Precision (number of terms) for the Puiseux expansions
-        in the function compute_puiseux.
-    base_point : array-like, optional
-        If provided, of shape (4,). This might be used to interpret expansions
-        in terms of the original coordinates (z1*, z2*). Not strictly required.
+        Expansion precision/length passed to `puiseux_expansions`.
+    base_point : array-like of shape (4,), optional
+        If provided, return expansions shifted back to global coordinates by
+        substituting x -> x + z1*, y -> y + z2*, where:
+            z1* = base_point[0] + i * base_point[2]
+            z2* = base_point[1] + i * base_point[3]
 
-    Returns:
-    --------
-    shifted_expansions : list of str
-        A list of textual expansions from compute_puiseux,
-        optionally adjusted if base_point is given.
+    Returns
+    -------
+    list[str]
+        Stringified sympy expressions of the Puiseux branches (shifted if requested).
     """
     x, y = sympy.symbols('x y')
-    I = sympy.I
-    
-    expansions = puiseux_expansions(F_hat_expr,x,y,prec)
-    if base_point is not None:
-        x_sym = sympy.Symbol('x', complex=True)
-        x_star = base_point[0] + 1j * base_point[2]
-        y_star = base_point[1] + 1j * base_point[3]
-        # For clarity, we do a naive substitution approach
-        # but the usage depends on how expansions interpret 'x'
-        shifted_expansions = [
-            str(exp.subs(x_sym, x_sym - x_star) + y_star)
-            for exp in expansions
-        ]
-    else:
-        shifted_expansions = [str(exp) for exp in expansions]
-    return shifted_expansions
+    exps = puiseux_expansions(F_hat_expr, x, y, prec)
 
+    out = []
+    if base_point is not None:
+        z1_star = base_point[0] + 1j * base_point[2]
+        z2_star = base_point[1] + 1j * base_point[3]
+        for e in exps:
+            e_sym = e if isinstance(e, sympy.Expr) else sympy.sympify(e)
+            e_shift = sympy.expand(e_sym.subs({x: x + z1_star, y: y + z2_star}))
+            out.append(str(e_shift))
+    else:
+        for e in exps:
+            out.append(str(e if isinstance(e, sympy.Expr) else sympy.sympify(e)))
+    return out
