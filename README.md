@@ -43,7 +43,7 @@ It implements our end-to-end pipeline – from data preprocessing through CVNN t
 # Newton‑Puiseux Analysis for Interpretability and Calibration of CVNNs
 
 ## Overview
-This repository provides the full codebase and reproducible scripts for our Newton‑Puiseux framework, which enhances interpretability and calibration of complex‑valued neural networks (CVNNs). We demonstrate our approach on both a controlled synthetic dataset and the MIT‑BIH arrhythmia corpus.
+This repository provides the full codebase and reproducible scripts for our Newton–Puiseux framework, which enhances interpretability and calibration of complex-valued neural networks (CVNNs). We demonstrate the approach on a controlled synthetic dataset and two real-data settings: the MIT-BIH arrhythmia corpus and the RadioML 2016.10A wireless modulation dataset.
 
 ---
 
