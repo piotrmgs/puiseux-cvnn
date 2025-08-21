@@ -392,45 +392,96 @@ This script performs the following steps:
 - `post_processing_synth/robustness_curves_point<idx>.png` — robustness plots.
 - `post_processing_synth/contour_point<idx>_fix_dim=[...].png` — local decision boundary visualizations.
 
-### 8. Post-Processing Real Data
+### 8. Post‑Processing Real Data (MIT‑BIH)
 
-To analyze uncertain ECG windows, generate local explanations, and robustness analyses on the MIT‑BIH dataset, run:
+This step consumes the artifacts produced by **Section 3 (MIT‑BIH uncertain points)** and performs local Newton–Puiseux analysis, robustness probes, LIME/SHAP explanations, calibration comparisons with confidence intervals, and sensitivity summaries.  
+
+**Prerequisites**
+
+- You have already run the MIT‑BIH pipeline (Section 3) and produced at least:
+  - `up_real/best_model_full.pt`
+  - `up_real/scaler_full.pkl`
+  - `up_real/uncertain_full.csv`
+  - *(optional)* `up_real/T_calib.pt` (if temperature scaling was used)
+  - *(optional)* `up_real/sens_grid.csv`, `up_real/cv_metrics_per_fold_multi.csv`
+- The MIT‑BIH Arrhythmia data are available locally (see **Datasets ⚠️**).
+
+**Run**
 
 ```bash
+# From the repo root
 python -m post_processing_real.post_processing_real
 ```
 
-This script performs the following steps:
+**What this does**
 
-1. **Model & data loading**:
-   - Loads the best retrained `SimpleComplexNet` weights from `up_real/best_model_full.pt`.
-   - Loads the temperature scaling parameter `T_calib.pt` if available (for calibrated softmax).
-   - Reads uncertain points from `up_real/uncertain_full.csv`.
-2. **Background data for LIME**:
-   - Samples 512 random ECG windows from the full dataset.
-   - Compresses them to C2 features via `compress_to_C2` for background reference.
-3. **Local polynomial fitting**: Computes a degree-4 surrogate `F̂` around each uncertain point (`delta=0.05`, `n_samples=300`) with `local_poly_approx_complex`.
-4. **Approximation quality**: Evaluates RMSE, MAE, Pearson correlation, and sign-agreement with `evaluate_poly_approx_quality`.
-5. **Puiseux expansions**: Computes series at each point using `puiseux_uncertain_point` and interprets them (`interpret_puiseux_expansions`).
-6. **Adversarial robustness**:
-   - Identifies top directions via `find_adversarial_directions` on the surrogate.
-   - Measures flip radii with `test_adversarial_impact` and plots curves (`plot_robustness_curve`).
-7. **Local explanations**:
-   - Computes LIME explanations (`compute_lime_explanation`) using the compressed background set.
-   - Computes SHAP values (`compute_shap_explanation`) for each test point.
-8. **2D decision contours**: Generates contour plots fixing dimensions (1,3) and (0,2) via `plot_local_contour_2d`.
-9. **Report generation**: For each point, writes `post_processing_real/benchmark_point<idx>.txt` containing:
-   - Base point coordinates and approximation metrics.
-   - Puiseux expressions & interpretations.
-   - Robustness analysis table with directions, phases, class changes, and flip radii.
-   - LIME & SHAP feature attributions.
-   - File paths of generated robustness and contour plots.
+1. **Load model & artifacts**
+   - Loads `best_model_full.pt`, optional `T_calib.pt` (temperature), and `scaler_full.pkl`.
+   - Loads uncertain anchors from `uncertain_full.csv`.
+   - Builds a background set (up to 512 windows) for LIME/SHAP and ensures consistent scaling via the saved scaler.
 
-**Outputs:**
+2. **(τ, δ) Sensitivity summary (if `sens_grid.csv` present)**
+   - Parses the grid and writes detailed and summarized reports:
+     - `sensitivity_detailed.csv` (full grid values),
+     - `sensitivity_summary.txt` and `sensitivity_extra.txt` (aggregates incl. correlations, medians, budget‑constrained bests).
 
-- `post_processing_real/benchmark_point<idx>.txt` — detailed local analysis report for each uncertain ECG window.
-- `post_processing_real/robustness_curves_point<idx>.png` — adversarial robustness plots.
-- `post_processing_real/contour_point<idx>_fix_dim=[...].png` — 2D decision boundary visualizations.
+3. **Calibration comparison with 95% CI**
+   - If `cv_metrics_per_fold_multi.csv` exists, compiles per‑method summaries:
+     - `comparative_table.csv` (mean ± CI for ECE/NLL/Brier/Acc/AUC),
+     - `calibration_ci_report.txt` (readable CI table),
+     - `calibration_stats_tests.csv` (pairwise Wilcoxon tests; skips if SciPy not installed),
+     - `calibration_winrate_vs_none.csv` (fold‑wise win‑rate vs **NONE**).
+
+4. **Per‑anchor local analysis**
+   For each uncertain ECG window:
+   - **Kink diagnostics**: non‑holomorphicity probe around the anchor (`kink_score`) and fraction of modReLU “kinks”; saves sweeps over `kink_eps`.
+   - **Robust local surrogate**: degree‑4 complex polynomial fit with outlier/weighting safeguards; reports condition, rank, kept ratio.
+   - **Quality metrics**: RMSE, MAE, Pearson correlation, sign‑agreement against the CVNN.
+   - **Newton–Puiseux expansions** + **interpretation** for local branches.
+   - **Robustness** along phase‑selected directions (class change & flip radius) with plots.
+   - **LIME & SHAP** explanations on consistently scaled C² features.
+   - **2D local contours** of the decision boundary for fixed dim pairs (1,3) and (0,2).
+   - **Resource benchmark**: timing/memory of Puiseux pipeline vs. gradient saliency.
+
+5. **Aggregate reports & calibration CI table**
+   - Builds 5‑fold CI tables for multiple calibrators (`none`, `platt`, `isotonic`, `beta`, `vector`, `temperature`), plus an ablation **none_T0** (uncalibrated at inference) if a temperature file is present.
+   - Summarizes kink prevalence and its effect on fit quality and residual statistics.
+   - Optional sweep of **ECE sensitivity to branch‑multiplicity mis‑estimation**.
+
+**Outputs (saved to `post_processing_real/`)**
+
+- **Logs**
+  - `post_processing_real.log` — progress, warnings, file provenance.
+
+- **Sensitivity (τ, δ)**
+  - `sensitivity_detailed.csv`, `sensitivity_summary.txt`, `sensitivity_extra.txt`.
+
+- **Calibration comparisons (from CV panel)**
+  - `comparative_table.csv`
+  - `calibration_ci_report.txt`
+  - `calibration_stats_tests.csv` *(if SciPy available)*
+  - `calibration_winrate_vs_none.csv`
+
+- **Per‑anchor artifacts** (for each point *i*)
+  - `benchmark_point<i>.txt` — comprehensive report (kink, fit, metrics, Puiseux, robustness, LIME/SHAP, resources).
+  - `robustness_curves_point<i>.png`
+  - `contour_point<i>_fix_dim=[1,3].png`, `contour_point<i>_fix_dim=[0,2].png`
+  - `kink_sweep_point<i>.csv`
+  - `resource_point<i>.txt`
+
+- **Aggregate summaries**
+  - `kink_summary.csv` — fractions of kink/active/inactive across points.
+  - `resource_summary.csv` — Puiseux vs. saliency (time/memory).
+  - `local_fit_summary.csv` — kept ratio, cond(A), degree, RMSE, sign‑agreement, residual stats.
+  - `kink_global_summary.txt` — prevalence and effects on fits/residuals.
+
+- **Calibration CI (local 5‑fold)**
+  - `calibration_folds_raw.csv`
+  - `calibration_ci_table.csv`
+  - `calibration_ci_report.txt` *(same name as above if present; latest run overwrites)*
+
+- **Branch multiplicity sensitivity**
+  - `branch_multiplicity_sensitivity.csv`
 
 ---
 
