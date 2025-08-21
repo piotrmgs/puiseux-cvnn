@@ -158,44 +158,84 @@ This script performs the following steps:
 - In-memory variables `X`, `y`, `X_norm`, `X_train`, `X_test`, `y_train`, `y_test` (accessible within the script)
 
 
-### 3. MIT-BIH uncertain points
+### 3. MIT‑BIH uncertain points
 
-To train, evaluate, and extract uncertain predictions on the MIT‑BIH Arrhythmia dataset, run:
+To train a CVNN with cross‑patient K‑Fold CV, calibrate it, and automatically flag uncertain predictions on the held‑out **TEST** split, run:
 
 ```bash
+# GPU if available
 python -m up_real.up_real
+
+# Force CPU (optional)
+python -m up_real.up_real --cpu
 ```
 
-This script executes the following pipeline:
+**What this does**
 
-1. **Data loading & preprocessing**: Reads raw ECG windows (L=128 samples, P=50 pre‑samples) from `--data_folder` and applies band‑pass filtering and Hilbert‑transform to obtain analytic signals.
-2. **Complex feature extraction**: Converts real-valued time series into 2‑dimensional complex statistics (`prepare_complex_input` with `method='complex_stats'`).
-3. **Cross‑patient K‑Fold CV**: Splits patient records into K folds (default 10), ensuring no subject appears in both train and test splits.
-4. **Model training (per fold)**:
-   - Builds a `SimpleComplexNet` (in_features=2 complex dims, hidden=64, out_features=2).
-   - Trains for `--epochs` using Adam (learning rate `--lr`).
-   - Records training history and selects best weights per fold.
-   - Evaluates on test split and accumulates predictions (`y_true`, `y_pred`, `y_prob`).
-5. **Global visualizations**:
-   - **Training curves** (loss & accuracy over epochs across folds; saved as `training_history.png`).
-   - **Calibration curve** (reliability diagram; `calibration_curve.png`).
-   - **Uncertainty histogram** (distribution of predicted probabilities; `uncertainty_histogram.png`).
-   - **Complex PCA scatter** of all data using `method='split_pca'` (`complex_pca_scatter.png`).
-   - **Ablation bar plot** showing impact of components (`ablation_barplot.png`).
-6. **Uncertain sample export**: Aggregates test‑fold samples with max softmax probability < `--threshold` and saves to `up_real/uncertain_full.csv`.
-7. **Optional full‑data retraining**:
-   - Splits the entire dataset 80/20, retrains the model, and saves best weights to `up_real/best_model_full.pt`.
-   - Saves full‑model training plots (`*_full.png`).
-8. **Temperature calibration**: Learns scalar temperature `T` on the full‑model test split (`tune_temperature`), then saves `up_real/T_calib.pt`.
-9. **Final uncertainty detection**: Applies calibrated model on held‑out full‑data test split to flag uncertain beats (same `--threshold`) and writes them to `up_real/uncertain_full.csv`.
+1. **Cross‑patient K‑Fold training** (`--folds`, default 10): splits patient records so no subject appears in both TRAIN and TEST in a fold; trains `SimpleComplexNet` on complex features (`complex_stats`).
+2. **Per‑fold calibration** (controlled by `--calibration`: `temperature` [default], `isotonic`, or `none`): applies calibration on the **validation** split of each fold and evaluates on the fold’s TEST.
+   - If `temperature`, saves `T_calib_fold{fold}.pt`.
+3. **Multi‑calibration evaluation** (optional, via `--calibs`): runs a panel of calibrators on the same fold logits (e.g., `temperature,isotonic,platt,beta,vector,none`) and writes comparative metrics per fold.
+4. **Global reliability curves**: writes baseline **RAW** and **calibrated** reliability diagrams aggregated across folds.
+5. **Automatic threshold selection on VALIDATION (full‑model stage)**:
+   - Builds a **(τ, δ)** grid where **τ** is the minimum confidence (max probability) to accept a prediction and **δ** is the minimum **margin** between the top‑2 class probabilities.
+   - If `--sensitivity` (default **on**), saves the grid to `sens_grid.csv` and heatmaps `sens_full_*`; also computes a "knee" score proxy.
+   - Selects `(τ*, δ*)` using an **exact review budget** (`--review_budget`, default 10 samples) via `select_thresholds_budget_count`. The chosen pair and stats are written to `sens_full.csv`.
+6. **Uncertain‑point detection on TEST**: flags samples with low confidence and/or small margin (i.e., `max_prob < τ*` and/or `margin < δ*`) and saves them to `uncertain_full.csv`.
+7. **Artifacts**: per‑fold training curves, confusion matrix + ROC, overall training history across folds, reliability diagrams (RAW vs calibrated), and uncertainty histograms (confidence and margin).
 
-**Outputs:**
+**Outputs (files)**
 
-- `run.log` — detailed logs of training, fold splits, and calibration steps.
-- `training_history.png`, `calibration_curve.png`, `uncertainty_histogram.png`, `complex_pca_scatter.png`, `ablation_barplot.png` — visualization artifacts.
-- `uncertain_full.csv` — indices, features, true labels, and class probabilities of uncertain ECG windows.
-- `best_model_full.pt` — best model weights after full‑data retraining.
-- `T_calib.pt` — learned temperature parameter for scaled softmax.
+- **Logs & meta**
+  - `run.log` — full run log (folds, timings, resources).
+  - `run_meta.json` — versions and device info for reproducibility.
+- **Per‑fold artifacts** (filenames include the fold index):
+  - training curves (e.g., `training_history_fold{fold}.png`),
+  - confusion matrix & ROC (e.g., `confusion_fold{fold}.png`, `roc_fold{fold}.png`),
+  - `scaler_fold{fold}.pkl`,
+  - (if `--calibration temperature`) `T_calib_fold{fold}.pt`.
+- **Cross‑fold (CV) metrics**
+  - `cv_metrics_per_fold.csv` — RAW vs calibrated (ECE, NLL, Brier, Acc, AUC) per fold.
+  - `cv_metrics_summary.csv` — mean ±95% CI for ECE/NLL/Brier across folds.
+  - `predictions_all_folds.csv` — row‑wise predictions with calibrated probs and the top‑2 **margin**.
+- **Multi‑calibration panel** (if `--calibs` is non‑empty; by default several methods are evaluated):
+  - `cv_metrics_per_fold_multi.csv` — per‑fold metrics for each method in `--calibs`.
+  - `cv_metrics_summary_multi.csv` — cross‑fold means and 95% CIs by method.
+- **Global visualizations**
+  - `calibration_curve_RAW.png` and `calibration_curve_{TS|ISO|CAL}.png` — reliability diagrams pre/post calibration.
+  - `uncertainty_histogram.png` — distribution of `max_prob` on TEST with τ* marker.
+  - `uncertainty_margin_hist.png` — distribution of the top‑2 **margin** with δ* marker.
+  - `complex_pca_scatter.png` — PCA of complex features over all records.
+- **Full‑model stage**
+  - `best_model_full.pt` — best weights after full retraining.
+  - `scaler_full.pkl` — StandardScaler for the full‑model pipeline.
+  - (if `--calibration temperature`) `T_calib.pt` — temperature for the full model.
+  - `sens_grid.csv`, `sens_full.csv`, and sensitivity heatmaps `sens_full_*`.
+- **Uncertain points**
+  - `uncertain_full.csv` — flagged TEST samples with columns:
+    - `index` (row id in TEST), `X` (feature vector), `true_label`, `p1`, `p2`.
+
+**Key CLI switches**
+
+- `--calibration {temperature,isotonic,none}` — per‑fold and full‑model calibration (**default: temperature**).
+- `--calibs` — comma‑separated list of calibration methods to **evaluate** in addition to the operational one (default: `temperature,isotonic,platt,beta,vector,none`).
+- `--sensitivity` / `--no-sensitivity` — enable/disable τ/δ grid & heatmaps (**on by default**).
+- `--review_budget <int>` — **exact count** of validation samples allowed for manual review; used to pick `(τ*, δ*)` (**default: 10**).
+- `--select_mode {capture,budget,risk,knee}` + `--capture_target`, `--max_abstain`, `--target_risk` — configure how the grid is scored/summarized (the **final selection** still uses `--review_budget`).
+- `--epochs`, `--lr`, `--batch_size`, `--folds`, `--cpu`, `--seed` — standard training controls.
+
+**Example**
+
+```bash
+# 10-fold CV on GPU (if available), temperature scaling, exact review budget of 20 samples:
+python -m up_real.up_real \
+  --data_folder mit-bih \
+  --output_folder up_real \
+  --epochs 10 --lr 1e-3 --batch_size 128 --folds 10 \
+  --calibration temperature \
+  --review_budget 20 \
+  --sensitivity
+```
 
 ### 4. Puiseux Test
 
