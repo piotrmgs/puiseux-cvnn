@@ -23,6 +23,7 @@ This repository provides the full codebase and reproducible scripts for our Newt
 ## Project Structure
 ```
 ├── mit‑bih/                      # Raw MIT‑BIH dataset
+├── radio-data/                   # External RadioML files
 ├── mit_bih_pre/                  # Preprocessing scripts for MIT‑BIH
 │   └── pre_pro.py                # Signal filtering and feature extraction
 ├── src/                          # Core library modules
@@ -48,6 +49,8 @@ This repository provides the full codebase and reproducible scripts for our Newt
 
 ## Dataset ⚠️
 
+### 1) MIT‑BIH Arrhythmia (PhysioNet)
+
 **MIT-BIH Arrhythmia Database is *not* stored in this repository.**
 
 **Manual download**  
@@ -57,6 +60,17 @@ This repository provides the full codebase and reproducible scripts for our Newt
 **Licence notice:**  
 MIT-BIH data are released under the PhysioNet open-access license.  
 By downloading the files you agree to its terms.
+
+### 2) RadioML 2016.10A (`RML2016.10a_dict.pkl`)
+**Dataset is *not* stored in this repository.**
+
+**Manual download**  
+  * Go to the DeepSig datasets page (RADIOML 2016.10A) and download the archive `RML2016.10a.tar.bz2` (it contains `RML2016.10a_dict.pkl`) or the `.pkl` file directly.  
+  * After download, extract (if needed) and **place the file** into `radio-data/`. Expected path: the code will look for: `radio-data/RML2016.10a_dict.pkl`.
+
+**License notice (RadioML 2016.10A):**  
+Released by DeepSig under **CC BY‑NC‑SA 4.0** (Attribution‑NonCommercial‑ShareAlike).  
+By downloading/using the dataset you agree to these terms. See the dataset page and license for details.
 
 -----
 
@@ -312,12 +326,17 @@ This script performs the following steps:
 ## License
 This project is released under the MIT License. See [LICENSE](LICENSE) for details.
 
-
 ---
 
 **MIT-BIH Arrhythmia Database**  
 ECG recordings are redistributed under the PhysioNet open-access license.  
 Please ensure compliance with the original terms: https://physionet.org/content/mitdb/1.0.0/
+
+---
+
+**RadioML 2016.10A**  
+This dataset is released by DeepSig under the Creative Commons Attribution‑NonCommercial‑ShareAlike 4.0 International (CC BY‑NC‑SA 4.0) license.  
+The dataset is **not redistributed** in this repository. Please ensure compliance with the original terms and cite the dataset appropriately (see the DeepSig datasets page for details).
 
 ---
 
