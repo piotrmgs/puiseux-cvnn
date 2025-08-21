@@ -1,4 +1,6 @@
-# up_radio.py — unified with up_real (RadioML 2016.10a, binary task)
+# Copyright (c) 2025 Piotr Migus
+# This code is licensed under the MIT License.
+# See the LICENSE file in the repository root for full license information.
 
 """
 Train & evaluate a Complex-Valued Neural Network (CVNN) on RadioML 2016.10a.
