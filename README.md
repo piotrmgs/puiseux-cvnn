@@ -30,6 +30,7 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   ├── post_processing.py        # Post‑processing (common)
 │   ├── find_up_synthetic.py      # Uncertainty mining on synthetic data
 │   ├── find_up_real.py           # Uncertainty mining on MIT‑BIH data
+│   ├── find_up_radio.py          # Uncertainty mining on RadioML data
 │   ├── local_analysis.py         # Local surrogate + Puiseux wrapper
 │   ├── puiseux.py                # Newton‑Puiseux solver
 ├── up_synth/                     # Synthetic dataset training and evaluation
@@ -42,6 +43,8 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   └── post_processing_synth.py
 ├── up_real/                      # MIT‑BIH CVNN training and evaluation
 │   └── up_real.py
+├── up_radio/                     # RadioML 2016.10A CVNN training and evaluation
+│   └── up_radio.py
 ├── post_processing_real/         # Post‑processing for MIT‑BIH data
 │   └── post_processing_real.py
 └── README.md                     # This file
@@ -237,7 +240,75 @@ python -m up_real.up_real \
   --sensitivity
 ```
 
-### 4. Puiseux Test
+### 4. RadioML 2016.10A — uncertain points
+
+This section mirrors the MIT‑BIH pipeline but runs on **RadioML 2016.10A**.  
+Make sure you have downloaded the dataset as described in **Datasets ⚠️** and that:
+```
+radio-data/RML2016.10a_dict.pkl
+```
+is present.
+
+**Run**
+
+```bash
+# GPU if available
+python -m up_radio.up_radio
+
+# Force CPU (optional)
+python -m up_radio.up_radio --cpu
+```
+
+**What this does**
+
+1. **Subset selection (RadioML 2016.10A)**: filters by modulation classes (`--mods`, default: `BPSK QPSK`) and SNR range (`--snr_low/--snr_high`, default: 5…15 dB).
+2. **Complex‑aware features**: converts raw IQ windows into compact **STFT‑based statistics** via `prepare_complex_input(method='stft_stats')`.
+3. **Stratified K‑Fold on samples** (`--folds`, default 10): trains `SimpleComplexNet` per fold with a train/val split inside each fold; standardization fitted on TRAIN only and saved per fold.
+4. **Probability calibration on VALIDATION** (operational method chosen by `--calibration`; default here: **platt** for binary tasks). The same calibrator is applied on TEST for metrics and plots.
+5. **Multi‑calibration sweep** (optional; `--calibs`): evaluates a panel (`temperature,isotonic,platt,beta,vector,none`) on the same TEST logits and logs per‑method metrics.
+6. **Cross‑fold aggregation**: reliability diagrams for **RAW** vs **CAL** (the chosen method), learning curves across folds, confusion matrices & ROC curves per fold.
+7. **Full‑model stage**: retrains on a fresh Train/Val/Test split; performs **(τ, δ)** sensitivity analysis on VALIDATION (if `--sensitivity`), selects **(τ\*, δ\*)** with an **exact review budget** (`--review_budget`), then plots TEST histograms for `p_max` (with τ\*) and top‑2 **margin** (with δ\*).
+8. **Uncertainty export**: flags TEST samples with `(p_max < τ*)` OR `(margin < δ*)` and writes them to `uncertain_full.csv`.
+
+**Outputs**
+
+- **Logs & metadata**
+  - `run.log` — run log (fold splits, timings, memory).
+  - `run_meta.json` — Python/NumPy/PyTorch versions and device.
+- **Per‑fold artifacts** (file names are suffixed with fold index):
+  - Training curves from `save_plots` (e.g., `training_history_fold{fold}.png`),
+  - Confusion matrix & ROC: `confusion_fold{fold}.png`, `roc_fold{fold}.png`,
+  - `scaler_fold{fold}.pkl` — StandardScaler fitted on TRAIN,
+  - If `--calibration temperature`: `T_calib_fold{fold}.pt`.
+- **Cross‑fold (CV) metrics**
+  - `cv_metrics_per_fold.csv` — per‑fold **RAW vs CAL** metrics: ECE, NLL, Brier, Acc, AUC (CAL columns are tagged with the chosen method, e.g., `CAL_PLATT`).
+  - `cv_metrics_summary.csv` — mean and 95% CI half‑widths for ECE/NLL/Brier across folds.
+  - `predictions_all_folds.csv` — per‑sample calibrated probabilities with **pmax** and top‑2 **margin**; column keys are suffixed with the CAL method (e.g., `p1_CAL_PLATT`, `margin_CAL_PLATT`).
+- **Multi‑calibration panel** (if `--calibs` non‑empty)
+  - `cv_metrics_per_fold_multi.csv` — per‑fold metrics for each method in `--calibs`.
+  - `cv_metrics_summary_multi.csv` — cross‑fold means and 95% CIs by method.
+- **Global visualizations**
+  - `calibration_curve_RAW.png` and `calibration_curve_<CAL>.png` (e.g., `calibration_curve_PLATT.png`),
+  - `complex_pca_scatter.png` — PCA on `stft_stats` features,
+  - `uncertainty_histogram.png` — TEST distribution of `p_max` with τ\* marker,
+  - `uncertainty_margin_hist.png` — TEST distribution of top‑2 margin with δ\* marker.
+- **Full‑model artifacts**
+  - `best_model_full.pt`, `scaler_full.pkl`,
+  - If `--calibration temperature`: `T_calib.pt`,
+  - Sensitivity products: `sens_grid.csv`, `sens_full.csv`, and heatmaps `sens_full_*`.
+- **Uncertain points**
+  - `uncertain_full.csv` with columns: `index`, `X` (scaled feature vector), `true_label`, `p1`, `p2`.
+
+**Key CLI switches**
+
+- **Dataset filters**: `--mods <list>` (e.g., `BPSK QPSK 8PSK`), `--snr_low <int>`, `--snr_high <int>`.
+- **Calibration (operational)**: `--calibration {temperature,isotonic,platt,beta,vector,none}` (**default: platt**).
+- **Calibration (evaluation panel)**: `--calibs` — comma‑separated methods to compare on TEST (default includes several).
+- **Sensitivity & thresholds**: `--sensitivity/--no-sensitivity`, `--review_budget <int>` (exact‑count selection of (τ\*, δ\*); default 10), and scoring knobs: `--select_mode {capture,budget,risk,knee}`, `--capture_target`, `--max_abstain`, `--target_risk`.
+- **Training**: `--epochs`, `--lr`, `--batch_size`, `--folds`, `--seed`, `--cpu`.
+
+
+### 5. Puiseux Test
 
 To compute and save Newton-Puiseux series expansions for a sample polynomial, run:
 
@@ -257,7 +328,7 @@ This script performs the following steps:
 
 - `puiseux_test/puiseux_expansions.txt` — text file containing the list of computed Puiseux series, complete with numeric evaluation of each term.
 
-### 5. Local Analysis test
+### 6. Local Analysis test
 
 To perform local polynomial approximation and Newton-Puiseux analysis on uncertain synthetic points, run:
 
@@ -287,7 +358,7 @@ This script executes the following pipeline:
 
 
 
-### 6. Post-Processing Synthetic Data
+### 7. Post-Processing Synthetic Data
 
 To analyze uncertain synthetic points, generate local explanations, and robustness analyses, run:
 
@@ -321,7 +392,7 @@ This script performs the following steps:
 - `post_processing_synth/robustness_curves_point<idx>.png` — robustness plots.
 - `post_processing_synth/contour_point<idx>_fix_dim=[...].png` — local decision boundary visualizations.
 
-### 7. Post-Processing Real Data
+### 8. Post-Processing Real Data
 
 To analyze uncertain ECG windows, generate local explanations, and robustness analyses on the MIT‑BIH dataset, run:
 
