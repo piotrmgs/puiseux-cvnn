@@ -1,14 +1,41 @@
 ---
 
+<details>
+<summary><strong>Table of contents</strong></summary>
+
+- [About this repo](#about-this-repo)
+- [Overview](#overview)
+- [Project Structure](#project-structure)
+- [Datasets ⚠️](#datasets)
+  - [MIT-BIH Arrhythmia (PhysioNet)](#1-mitbih-arrhythmia-physionet)
+  - [RadioML 2016.10A (`RML2016.10a_dict.pkl`)](#2-radioml-201610a-rml201610a_dictpkl)
+- [Installation](#installation)
+- [Quick Start (synthetic benchmark)](#quick-start-synthetic-benchmark)
+- [Usage](#usage)
+  - [1. Synthetic uncertain points](#1-synthetic-uncertain-points)
+  - [2. MIT-BIH preprocessing](#2-mit-bih-preprocessing)
+  - [3. MIT‑BIH uncertain points](#3-mit-bih-uncertain-points)
+  - [4. RadioML 2016.10A — uncertain points](#4-radioml-201610a--uncertain-points)
+  - [5. Puiseux Test](#5-puiseux-test)
+  - [6. Local Analysis test](#6-local-analysis-test)
+  - [7. Post-Processing Synthetic Data](#7-post-processing-synthetic-data)
+  - [8. Post-Processing Real Data (MIT-BIH)](#8-post-processing-real-data-mit-bih)
+  - [9. Post-Processing Radio Data (RadioML 2016.10A)](#9-post-processing-radio-data-radioml-201610a)
+- [License](#license)
+- [Contact](#contact)
+
+</details>
+
+
 ## About this repo
-This repository contains the complete, reproducible codebase that accompanies the paper *“Newton-Puiseux Analysis for Interpretability and Calibration of Complex-Valued Neural Networks”*.  
+This repository contains the complete, reproducible codebase that accompanies the paper *“Newton-Puiseux Analysis for Interpretability and Calibration of Complex-Valued Neural Networks”*. 
 
 [![arXiv](https://img.shields.io/badge/arXiv-2504.19176-b31b1b.svg)](https://arxiv.org/abs/2504.19176)
 
 
 https://arxiv.org/pdf/2504.19176
 
-It implements our end-to-end pipeline – from data preprocessing through CVNN training to Newton-Puiseux-based local analysis – for both a controlled synthetic benchmark and the MIT-BIH Arrhythmia corpus.
+It implements our end-to-end pipeline – from data preprocessing through CVNN training to Newton–Puiseux-based local analysis – across three settings: (1) a controlled synthetic benchmark, (2) the MIT-BIH arrhythmia corpus, and (3) the RadioML 2016.10A wireless modulation dataset.
 
 ---
 
@@ -52,7 +79,10 @@ This repository provides the full codebase and reproducible scripts for our Newt
 └── README.md                     # This file
 ```
 
-## Dataset ⚠️
+<!-- Fix anchor: Datasets -->
+<a id="datasets"></a>
+## Datasets ⚠️
+
 
 ### 1) MIT‑BIH Arrhythmia (PhysioNet)
 
@@ -92,7 +122,7 @@ By downloading/using the dataset you agree to these terms. See the dataset page 
    ```
 
 ------
-## Quick Start (synthetic benchmark in 3 steps)
+## Quick Start (synthetic benchmark)
 ```bash
 # 1  Run the complete synthetic pipeline (≃ 30 s on CPU)
 python -m up_synth.up_synthetic
@@ -163,7 +193,7 @@ This script performs the following steps:
 - In-memory variables `X`, `y`, `X_norm`, `X_train`, `X_test`, `y_train`, `y_test` (accessible within the script)
 
 
-### 3. MIT‑BIH uncertain points
+### 3. MIT-BIH uncertain points
 
 To train a CVNN with cross‑patient K‑Fold CV, calibrate it, and automatically flag uncertain predictions on the held‑out **TEST** split, run:
 
@@ -394,7 +424,7 @@ This script performs the following steps:
 - `post_processing_synth/robustness_curves_point<idx>.png` — robustness plots.
 - `post_processing_synth/contour_point<idx>_fix_dim=[...].png` — local decision boundary visualizations.
 
-### 8. Post‑Processing Real Data (MIT‑BIH)
+### 8. Post-Processing Real Data (MIT-BIH)
 
 This step consumes the artifacts produced by **Section 3 (MIT‑BIH uncertain points)** and performs local Newton–Puiseux analysis, robustness probes, LIME/SHAP explanations, calibration comparisons with confidence intervals, and sensitivity summaries.  
 
@@ -486,7 +516,7 @@ python -m post_processing_real.post_processing_real
   - `branch_multiplicity_sensitivity.csv`
  
 
-### 9. Post‑Processing Radio Data (RadioML 2016.10A)
+### 9. Post-Processing Radio Data (RadioML 2016.10A)
 
 This step mirrors the MIT‑BIH post‑processing but uses artifacts from the **RadioML** pipeline (Section 4). It performs local Newton–Puiseux analysis in **C²** (two complex features → 4 real inputs), robustness probes, LIME/SHAP explanations, calibration comparisons with 95% CIs (plus Wilcoxon and win‑rate), sensitivity summaries for (τ, δ), and resource benchmarking.
 
