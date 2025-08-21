@@ -380,100 +380,72 @@ def evaluate_model(model, X_test, y_test):
 # 7. Finding "uncertain" points
 ############################################################
 def find_uncertain_points(
-        model: nn.Module,
-        X_data: torch.Tensor,
-        y_data: torch.Tensor,
-        prob_thr: float = 0.6,
-        temperature: torch.Tensor | None = None,
-        threshold: float | None = None,
-        device: str = 'cpu') -> list[dict]:
+    model: nn.Module,
+    X_data: torch.Tensor,
+    y_data: torch.Tensor,
+    prob_thr: float | None = 0.6,
+    margin_delta: float | None = None,
+    temperature: torch.Tensor | None = None,
+    threshold: float | None = None,   # backward-compat alias for margin_delta
+    device: str = 'cpu'
+) -> list[dict]:
     """
-    Identify uncertain predictions made by a classification model.
+    Flag samples as 'uncertain' if:
+      (max softmax < prob_thr) OR (top-2 probability margin < margin_delta).
 
-    This function evaluates a trained classification model on a given dataset and identifies 
-    samples where the model is uncertain about its predictions. Uncertainty can be measured 
-    in two ways:
-        1. By the maximum predicted probability (`prob_thr`)
-        2. By the confidence margin between the top two predicted probabilities (`threshold`)
-
-    Parameters:
-    ----------
-    model : nn.Module
-        The trained PyTorch classification model.
-    
-    X_data : torch.Tensor
-        Input features (samples) for which predictions are to be evaluated.
-
-    y_data : torch.Tensor
-        True labels corresponding to `X_data`.
-    
-    prob_thr : float, optional (default=0.6)
-        Threshold for maximum predicted probability. Samples with max probability lower 
-        than this value are considered uncertain. Used only if `threshold` is None.
-
-    temperature : torch.Tensor or None, optional
-        Optional temperature scaling tensor to calibrate logits before computing probabilities.
-        Helps in softening or sharpening the predicted distributions.
-
-    threshold : float or None, optional
-        If set, this threshold is used instead of `prob_thr` to identify uncertainty based 
-        on the margin between the top two probabilities (e.g., |p1 - p2|).
-
-    device : str, optional (default='cpu')
-        Device on which computation should be performed ('cpu' or 'cuda').
-
-    Returns:
-    -------
-    list of dict
-        A list of dictionaries, each containing:
-            - "index": Index of the sample in the dataset
-            - "X": Input sample features (as a list)
-            - "true_label": Ground truth label
-            - "prob": Model-predicted probabilities for all classes
-            - "logits": Raw logits before softmax
-
-    Notes:
-    -----
-    - This function assumes binary classification (2-class problem).
-    - If both `prob_thr` and `threshold` are provided, only `threshold` is used.
+    Works for binary and multi-class. Supports optional temperature scaling.
+    If only one of prob_thr / margin_delta is provided, uses that one.
+    If 'threshold' is given, it's treated as margin_delta for backward compatibility.
     """
-    
+
+    # --- Backward compatibility: map old 'threshold' to 'margin_delta'
+    if margin_delta is None and threshold is not None:
+        margin_delta = threshold
+
     model.eval()
     X_data = X_data.to(device).float()
 
     with torch.no_grad():
-        # Forward pass through the model and convert complex outputs to logits
         logits = complex_modulus_to_logits(model(X_data))
-
-        # Optional temperature scaling for logit calibration
         if temperature is not None:
             logits = logits / temperature.to(logits.device)
-
-        # Convert logits to class probabilities
         probs = torch.softmax(logits, dim=1)
 
-    # Auxiliary metrics
-    max_p = probs.max(dim=1).values  # Max predicted probability for each sample
-    margin = torch.abs(probs[:, 0] - probs[:, 1])  # Difference between top-2 classes
+    # Max probability and top-2 margin (multi-class safe)
+    topk_vals = torch.topk(probs, k=min(2, probs.size(1)), dim=1).values  # (N, K)
+    max_p = topk_vals[:, 0]
+    if probs.size(1) > 1:
+        margin = topk_vals[:, 0] - topk_vals[:, 1]  # >= 0
+    else:
+        # degenerate 1-class case: define margin to keep API intact
+        margin = 2 * max_p - 1.0
 
-    # Debugging / logging statistics
-    print(f"[INFO] min max‑p={max_p.min():.3f}  |  max max‑p={max_p.max():.3f}")
-    print(f"[INFO] mean margin={margin.mean():.3f}")
+    # Build uncertainty mask using OR over the available criteria
+    mask = torch.zeros_like(max_p, dtype=torch.bool)
+    eps = 1e-6
+    if prob_thr is not None:
+        mask |= (max_p <= prob_thr + eps)
+    if margin_delta is not None:
+        mask |= (margin <= margin_delta + eps)
 
+    # Debug / quick stats
+    print(f"[INFO] min max-p={max_p.min():.3f} | max max-p={max_p.max():.3f} | "
+          f"mean margin={margin.mean():.3f} | n_uncertain={int(mask.sum().item())}")
+
+    # Pack results
+    idxs = torch.nonzero(mask, as_tuple=False).flatten().cpu().tolist()
     unsure = []
-    for i in range(len(X_data)):
-        # Define uncertainty condition
-        cond = (max_p[i] < prob_thr) if threshold is None else (margin[i] < threshold)
-        
-        if cond:
-            unsure.append({
-                "index":      int(i),
-                "X":          X_data[i].cpu().tolist(),
-                "true_label": int(y_data[i]),
-                "prob":       probs[i].cpu().tolist(),
-                "logits":     logits[i].cpu().tolist()
-            })
-
+    for i in idxs:
+        unsure.append({
+            "index":      int(i),
+            "X":          X_data[i].detach().cpu().tolist(),
+            "true_label": int(y_data[i]),
+            "pred":       int(probs[i].argmax().item()),
+            "prob":       probs[i].detach().cpu().tolist(),
+            "logits":     logits[i].detach().cpu().tolist(),
+            "maxp":       float(max_p[i].item()),
+            "margin":     float(margin[i].item()),
+        })
     return unsure
 
 
