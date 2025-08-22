@@ -59,7 +59,7 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   ├── find_up_real.py           # Uncertainty mining on MIT‑BIH data
 │   ├── find_up_radio.py          # Uncertainty mining on RadioML data
 │   ├── local_analysis.py         # Local surrogate + Puiseux wrapper
-│   ├── puiseux.py                # Newton‑Puiseux solver
+│   └── puiseux.py                # Newton‑Puiseux solver
 ├── up_synth/                     # Synthetic dataset training and evaluation
 │   └── up_synthetic.py
 ├── local_analysis_synth_test/    # Tests for local analysis (synthetic)
