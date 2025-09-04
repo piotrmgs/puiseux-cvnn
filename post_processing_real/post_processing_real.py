@@ -409,6 +409,7 @@ if __name__ == "__main__":
     kink_rows = []
     res_rows = []
     fit_rows = []
+    dom_rows = []
 
     for i, up in enumerate(up_list):
         print(f"\n=== POINT # {i} ===")
@@ -557,6 +558,99 @@ if __name__ == "__main__":
                     feat_name, scalarize(shap_class0[fid]), scalarize(shap_class1[fid])
                 ))
 
+        # ==== AXIS-BASELINE RAY SWEEPS (add below SHAP block) ====
+        def _flip_radius_along_vector(model, x0, v, device, T=None, r_max=0.02, steps=20):
+            v = np.asarray(v, dtype=np.float32)
+            n = np.linalg.norm(v)
+            if not np.isfinite(n) or n < 1e-12:
+                return None
+            v = v / n
+            x_init = torch.from_numpy(x0.astype(np.float32)).to(device).unsqueeze(0)
+            with torch.no_grad():
+                logits0 = complex_modulus_to_logits(model(x_init))
+                if T is not None:
+                    logits0 = logits0 / T.to(device)
+                y0 = int(torch.softmax(logits0, dim=1).argmax(dim=1).item())
+            for t in np.linspace(0.0, r_max, steps+1)[1:]:
+                x_t = torch.from_numpy((x0 + t * v).astype(np.float32)).to(device).unsqueeze(0)
+                logits = complex_modulus_to_logits(model(x_t))
+                if T is not None:
+                    logits = logits / T.to(device)
+                y = int(torch.softmax(logits, dim=1).argmax(dim=1).item())
+                if y != y0:
+                    return float(t)
+            return None  # no flip within budget
+
+        def _idx_from_featname(name: str):
+            # Map feature label to index in R^4 = [Re(z1), Re(z2), Im(z1), Im(z2)]
+            name = name.replace(" ", "").lower()
+            if "re(z1)" in name or "rex1" in name: return 0
+            if "re(z2)" in name or "rex2" in name: return 1
+            if "im(z1)" in name or "imx1" in name: return 2
+            if "im(z2)" in name or "imx2" in name: return 3
+            return None
+
+        def _best_axis_from_lime(lime_list):
+            # lime_list: [(feat_name, weight), ...] descending by |weight|
+            for feat, w in sorted(lime_list, key=lambda kv: abs(kv[1]), reverse=True):
+                j = _idx_from_featname(feat)
+                if j is not None:
+                    return j
+            return None
+
+        def _best_axis_from_shap(shap_vec):
+            # shap_vec: ndarray shape (4,)
+            import numpy as np
+            j = int(np.nanargmax(np.abs(shap_vec)))
+            return j
+
+        # pick top axis for LIME/SHAP
+        axis_lime = _best_axis_from_lime(lime_list)
+        axis_shap = _best_axis_from_shap(shap_class1 if shap_class1 is not None else shap_class0)
+
+        # gradient (saliency) direction in R^4
+        model.zero_grad()
+        x_t = torch.from_numpy(xstar.astype(np.float32)).to(device).unsqueeze(0).requires_grad_(True)
+        logits = complex_modulus_to_logits(model(x_t))
+        if T is not None:
+            logits = logits / T.to(device)
+        y_hat = int(torch.softmax(logits, dim=1).argmax(dim=1).item())
+        logits[0, y_hat].backward()
+        g = x_t.grad.detach().cpu().numpy().reshape(-1)
+        grad_dir = g if np.linalg.norm(g) > 1e-12 else None
+        E = np.eye(4, dtype=np.float32)
+        def _min_flip_two_sides(vec):
+            r1 = _flip_radius_along_vector(model, xstar, vec, device, T=T, r_max=0.02, steps=20)
+            r2 = _flip_radius_along_vector(model, xstar, -vec, device, T=T, r_max=0.02, steps=20)
+            vals = [r for r in [r1, r2] if r is not None]
+            return (min(vals) if vals else None)
+
+        flip_grad = _min_flip_two_sides(grad_dir) if grad_dir is not None else None
+        flip_lime = _min_flip_two_sides(E[axis_lime]) if axis_lime is not None else None
+        def _clamp_index(idx, n):
+            if idx is None or n <= 0:
+                return None
+            idx = int(idx)
+            if idx < 0:
+                return 0
+            if idx >= n:
+                return n - 1
+            return idx
+
+        idx_shap = _clamp_index(axis_shap, len(E))
+        flip_shap = _min_flip_two_sides(E[idx_shap]) if idx_shap is not None else None
+
+
+
+        # 7b. Axis-baseline ray sweeps 
+        axis_report_str = (
+            "AXIS-BASELINE RAY SWEEPS (r_max=0.02, steps=20)\n"
+            f"   flip_grad = {('N/A' if flip_grad is None else f'{float(flip_grad):.6f}')}\n"
+            f"   flip_lime = {('N/A' if flip_lime is None else f'{float(flip_lime):.6f}')}\n"
+            f"   flip_shap = {('N/A' if flip_shap is None else f'{float(flip_shap):.6f}')}\n\n"
+        )
+
+                
         # ------------------------------------------------------------------
         # (E) 2D local decision contour (fix pairs of dims)
         # ------------------------------------------------------------------
@@ -645,6 +739,153 @@ if __name__ == "__main__":
                 f_out.write(f"      Interpretation    : {ir['comment']}\n")
             f_out.write("\n")
 
+            # --- Predicted onset radius from dominant quadratic/quartic Puiseux coefficients ---
+            # We compute r_dom ≈ sqrt(|c2|/|c4|) using the largest-magnitude quadratic and quartic
+            # coefficients across all local branches. This is a heuristic for the radius at which
+            # the quartic term starts to dominate curvature (onset of rapid class flips).
+            import re, math
+            import numpy as np
+
+            def _extract_c2_c4(ir_dict):
+                """Extract |c2| and |c4| candidates from a single 'interpret_results' entry.
+                Supports several possible field names; falls back to regex over the textual series."""
+                c2_cands, c4_cands = [], []
+
+                # 1) Structured fields that some implementations may provide
+                for k in ("dominant_c2", "c2_dom", "c2", "quad_coeff", "c2_coeff"):
+                    val = ir_dict.get(k, None)
+                    try:
+                        if val is not None:
+                            c2_cands.append(abs(complex(val)))
+                    except Exception:
+                        pass
+                for k in ("dominant_c4", "c4_dom", "c4", "quartic_coeff", "c4_coeff"):
+                    val = ir_dict.get(k, None)
+                    try:
+                        if val is not None:
+                            c4_cands.append(abs(complex(val)))
+                    except Exception:
+                        pass
+
+                # 2) A generic 'coeffs' / 'terms' list with entries like {'degree': 2, 'coeff': ...}
+                coeff_list = ir_dict.get("coeffs") or ir_dict.get("terms") or []
+                for t in coeff_list:
+                    try:
+                        deg = t.get("degree", None)
+                        val = t.get("coeff", None)
+                    except AttributeError:
+                        deg, val = None, None
+                    if deg in (2, 2.0) and val is not None:
+                        try: c2_cands.append(abs(complex(val)))
+                        except Exception: pass
+                    if deg in (4, 4.0) and val is not None:
+                        try: c4_cands.append(abs(complex(val)))
+                        except Exception: pass
+
+                # 3) Regex fallback on the textual representation 'puiseux_expr'
+                s = str(ir_dict.get("puiseux_expr", ""))
+                # accept patterns like: 3.08 x^2, -291.86 x2, 1.09e7 x**4
+                def _grab_deg(deg, bucket):
+                    pat = rf'([+-]?\s*(?:\d+\.\d+|\d+)(?:[eE][+-]?\d+)?)\s*(?:\*?\s*)?x(?:\s*\^\s*|\*\*|)\s*{deg}\b'
+                    for g in re.findall(pat, s):
+                        try:
+                            bucket.append(abs(float(g)))
+                        except Exception:
+                            pass
+                _grab_deg(2, c2_cands)
+                _grab_deg(4, c4_cands)
+
+                c2 = max(c2_cands) if len(c2_cands) else float("nan")
+                c4 = max(c4_cands) if len(c4_cands) else float("nan")
+                return c2, c4
+
+            # Aggregate across all branches for this anchor
+            c2_vals, c4_vals = [], []
+            for ir in interpret_results:
+                c2_i, c4_i = _extract_c2_c4(ir)
+                if np.isfinite(c2_i):
+                    c2_vals.append(c2_i)
+                if np.isfinite(c4_i):
+                    c4_vals.append(c4_i)
+
+            c2_dom = max(c2_vals) if len(c2_vals) else float("nan")
+            c4_dom = max(c4_vals) if len(c4_vals) else float("nan")
+
+            if np.isfinite(c2_dom) and np.isfinite(c4_dom) and c4_dom > 0:
+                r_dom = float(np.sqrt(c2_dom / max(c4_dom, 1e-12)))
+                print(f"[PUISEUX] dominant |c2|={c2_dom:.3g}, |c4|={c4_dom:.3g} -> predicted onset radius r_dom≈{r_dom:.6f}")
+                f_out.write(f"   Dominant |c2| = {c2_dom:.6g}\n")
+                f_out.write(f"   Dominant |c4| = {c4_dom:.6g}\n")
+                f_out.write(f"   Predicted onset radius r_dom ≈ sqrt(|c2|/|c4|) = {r_dom:.6f}\n")
+            else:
+                print("[PUISEUX] Could not extract dominant |c2|/|c4|; skipping r_dom.")
+                f_out.write("   Predicted onset radius r_dom: N/A (could not extract |c2|/|c4|)\n")
+
+            f_out.write("\n")
+
+            
+            
+                        # --- Dominant-ratio heuristic (r_dom) and observed flip radius ---
+            # We estimate when quartic terms overtake quadratic curvature: 
+            # r_dom ≈ sqrt(max|c2| / max|c4|), where c2 and c4 are coefficients of x^2 and x^4
+            # across all Puiseux branches. We also extract the minimal observed flip radius r_flip
+            # from the robustness table above.
+            try:
+                # 1) Parse Puiseux expressions into SymPy and collect coefficients
+                exprs = []
+                for ir in interpret_results:
+                    expr_repr = ir.get("puiseux_expr")
+                    if isinstance(expr_repr, sympy.Expr):
+                        e = sympy.expand(expr_repr)
+                    else:
+                        # robust to string formatting
+                        e = sympy.expand(sympy.sympify(str(expr_repr)))
+                    exprs.append(e)
+
+                max_abs_c2 = 0.0
+                max_abs_c4 = 0.0
+                for e in exprs:
+                    c2 = e.coeff(x_sym, 2)
+                    c4 = e.coeff(x_sym, 4)
+
+                    # Convert possibly-complex SymPy numbers to Python complex and take magnitude
+                    if c2 != 0:
+                        max_abs_c2 = max(max_abs_c2, float(abs(complex(c2.evalf()))))
+                    if c4 != 0:
+                        max_abs_c4 = max(max_abs_c4, float(abs(complex(c4.evalf()))))
+
+                if (max_abs_c2 > 0.0) and (max_abs_c4 > 0.0):
+                    r_dom = float(np.sqrt(max_abs_c2 / max(max_abs_c4, 1e-12)))
+                else:
+                    r_dom = float("nan")
+            except Exception as e:
+                logger.warning("Failed to compute r_dom for point %d: %s", i, e)
+                max_abs_c2 = float("nan")
+                max_abs_c4 = float("nan")
+                r_dom = float("nan")
+
+            # 2) Observed minimal flip radius from robustness results_table
+            try:
+                r_flip_candidates = [row["changed_radius"] for row in results_table
+                                     if row.get("changed_radius") is not None]
+                r_flip = float(min(r_flip_candidates)) if len(r_flip_candidates) else float("nan")
+            except Exception as e:
+                logger.warning("Failed to compute r_flip for point %d: %s", i, e)
+                r_flip = float("nan")
+
+            # 3) Persist both numbers to the TXT so external parsers can consume them
+            f_out.write("   Dominant-ratio heuristic and flip comparison:\n")
+            f_out.write(f"      max|c2| = {max_abs_c2:.6g}, max|c4| = {max_abs_c4:.6g}\n")
+            f_out.write(f"      Predicted onset radius r_dom ≈ sqrt(|c2|/|c4|) = {r_dom:.6f}\n")
+            f_out.write("      Observed min flip radius r_flip = "
+                        f"{('N/A' if np.isnan(r_flip) else f'{r_flip:.6f}')}\n\n")
+
+            # 4) Collect for a CSV summary across all anchors
+            dom_rows.append([i, max_abs_c2, max_abs_c4, r_dom, r_flip])
+
+            
+            
+            
             f_out.write("5. Robustness Analysis Results:\n")
             f_out.write("-" * 80 + "\n")
             f_out.write("{:<10s} {:<20s} {:<10s} {:<18s} {:<15s}\n".format(
@@ -675,6 +916,9 @@ if __name__ == "__main__":
                                 f"Class 1: {scalarize(shap_class1[fid]):.3f}\n")
             f_out.write("\n")
 
+            # 7b. Axis-baseline ray sweeps
+            f_out.write(axis_report_str)
+            
             f_out.write("8. Resource benchmark (Puiseux vs gradient saliency):\n")
             f_out.write(f"   Puiseux times   : sample={times_pp['time_sampling']:.2f}s, lsq={times_pp['time_lstsq']:.2f}s, "
                         f"factor={times_pp['time_factor']:.2f}s, simplify={times_pp['time_simplify']:.2f}s, "
@@ -806,6 +1050,9 @@ if __name__ == "__main__":
             "point","kept_ratio","cond","degree_used","RMSE","sign_agree",
             "resid_mean","resid_std","resid_skew","resid_kurt"
         ]).to_csv(os.path.join(OUT_DIR,"local_fit_summary.csv"), index=False)
+        pd.DataFrame(dom_rows, columns=["point","max_abs_c2","max_abs_c4","r_dom","r_flip"]).to_csv(
+            os.path.join(OUT_DIR,"dominant_ratio_summary.csv"), index=False)
+
 
         # --- GLOBAL kink report ---
         ks = pd.DataFrame(kink_rows, columns=["point","frac_kink","frac_active","frac_inactive","n"])
