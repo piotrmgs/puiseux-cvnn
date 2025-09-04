@@ -21,6 +21,9 @@
   - [7. Post-Processing Synthetic Data](#7-post-processing-synthetic-data)
   - [8. Post-Processing Real Data (MIT-BIH)](#8-post-processing-real-data-mit-bih)
   - [9. Post-Processing Radio Data (RadioML 2016.10A)](#9-post-processing-radio-data-radioml-201610a)
+  - [10. Newton–Puiseux Evidence & Triage (MIT-BIH)](#10-newtonpuiseux-evidence--triage-mit-bih)
+  - [11. Newton–Puiseux Evidence & Triage (RadioML 2016.10A)](#11-newtonpuiseux-evidence--triage-radioml-201610a)
+
 - [License](#license)
 - [Contact](#contact)
 
@@ -76,6 +79,10 @@ This repository provides the full codebase and reproducible scripts for our Newt
 │   └── post_processing_real.py
 ├── post_processing_radio/        # Post‑processing for RadioML 2016.10A
 │   └── post_processing_radio.py
+├── NP-analysis_real/             # Newton–Puiseux evidence & triage (MIT-BIH)
+│   └── NP-analysis_real.py
+├── NP-analysis_radio/            # Newton–Puiseux evidence & triage (RadioML 2016.10A)
+│   └── NP-analysis_radio.py
 └── README.md                     # This file
 ```
 
@@ -480,6 +487,10 @@ python -m post_processing_real.post_processing_real
    - Summarizes kink prevalence and its effect on fit quality and residual statistics.
    - Optional sweep of **ECE sensitivity to branch‑multiplicity mis‑estimation**.
 
+6. **Dominant-ratio summary**
+   - Extracts dominant Puiseux coefficients per anchor (max |c₂| and |c₄| across branches) and computes the dominant-ratio proxy `r_dom = sqrt(|c₂|/|c₄|)`.
+   - Writes a consolidated CSV for downstream evidence building (see Section 10): `post_processing_real/dominant_ratio_summary.csv`.
+
 **Outputs (saved to `post_processing_real/`)**
 
 - **Logs**
@@ -506,6 +517,8 @@ python -m post_processing_real.post_processing_real
   - `resource_summary.csv` — Puiseux vs. saliency (time/memory).
   - `local_fit_summary.csv` — kept ratio, cond(A), degree, RMSE, sign‑agreement, residual stats.
   - `kink_global_summary.txt` — prevalence and effects on fits/residuals.
+  - `dominant_ratio_summary.csv` — per-anchor table with `point`, `c2_max_abs`, `c4_max_abs`, and the dominant-ratio proxy `r_dom = sqrt(|c2|/|c4|)`; consumed by `NP-analysis_real.py` (Section 10).
+
 
 - **Calibration CI (local 5‑fold)**
   - `calibration_folds_raw.csv`
@@ -575,6 +588,10 @@ python -m post_processing_radio.post_processing_radio
 7. **Branch‑multiplicity sensitivity**  
    Saves `branch_multiplicity_sensitivity.csv` showing ECE sensitivity to multiplicity mis‑estimation (via `sweep_multiplicity_misestimation`).
 
+8. **Dominant-ratio summary**
+   - Extracts dominant Puiseux coefficients per anchor (max |c₂| and |c₄| across branches) and computes the dominant-ratio proxy `r_dom = sqrt(|c₂|/|c₄|)`.
+   - Writes a consolidated CSV for downstream evidence building (see Section 11): `post_processing_radio/dominant_ratio_summary.csv`.
+
 **Outputs (saved to `post_processing_radio/`)**
 
 - **Logs**
@@ -600,6 +617,8 @@ python -m post_processing_radio.post_processing_radio
   - `kink_summary.csv`, `kink_global_summary.txt`
   - `resource_summary.csv`
   - `local_fit_summary.csv`
+  - `dominant_ratio_summary.csv` — per-anchor table with `point`, `c2_max_abs`, `c4_max_abs`, and the dominant-ratio proxy `r_dom = sqrt(|c2|/|c4|)`; consumed by `NP-analysis_radio.py` (Section 11).
+
 
 - **Calibration CI (local 5‑fold)**
   - `calibration_folds_raw.csv`
@@ -608,6 +627,144 @@ python -m post_processing_radio.post_processing_radio
 
 - **Branch multiplicity**
   - `branch_multiplicity_sensitivity.csv`
+
+### 10. Newton–Puiseux Evidence & Triage (MIT-BIH)
+
+Build a compact, publication-ready summary of Newton–Puiseux evidence by **joining uncertain anchors** with **per-anchor post-processing reports** and (optionally) **dominant-ratio** estimates. Produces correlation stats, triage PR curves (AUPRC), head-to-head flip-rate summaries vs. XAI baselines, figures, and a short Markdown report.
+
+**Prerequisites**
+
+- You have completed **Section 3** (MIT-BIH uncertain points) and **Section 8** (Post-Processing Real Data), which should produce at least:
+  - `up_real/uncertain_full.csv`
+  - `post_processing_real/benchmark_point<i>.txt` (per-anchor reports)
+  - *(optional)* `post_processing_real/dominant_ratio_summary.csv`  
+    If absent, the script will fall back to `r_dom_pred` parsed from TXT; if missing but `|c2|,|c4|` are available, it will compute `r_dom ≈ sqrt(|c2|/|c4|)` automatically.
+
+**Run**
+
+```bash
+python -m NP-analysis_real.NP-analysis_real.py
+````
+
+**What this does**
+
+1. **Load & join**
+
+   * Loads anchors from `up_real/uncertain_full.csv` and assigns a stable `point` index `0..N-1`.
+   * Parses `post_processing_real/benchmark_point<i>.txt` for:
+
+     * **Kink diagnostics**: `frac_kink`, `frac_active`, `frac_inactive`.
+     * **Local fit**: `kept_ratio`, `cond`, `rank`, `n_monomials`, `degree_used`, `retry`.
+     * **Approx. quality**: `RMSE`, `MAE`, `Pearson`, `Sign_Agreement`, residual moments.
+     * **Robustness**: per-direction flip radii and `min_flip_radius` (mapped to `r_flip_obs`).
+     * **Timings/footprint**: `puiseux_time_s`, `saliency_ms`, CPU/GPU memory, `saliency_grad_norm`.
+     * *(optional)* `r_dom_pred` and axis-baseline sweep flips: `flip_grad`, `flip_lime`, `flip_shap`.
+   * Merges `post_processing_real/dominant_ratio_summary.csv` if present (normalized to columns: `c2_max_abs`, `c4_max_abs`, `r_dom`, `r_flip`).
+   * If `r_dom` is missing but `|c2|,|c4|` exist, computes `r_dom = sqrt(|c2|/|c4|)`.
+
+2. **Correlation & error summary**
+
+   * Computes `MAE(|r_dom - r_flip_obs|)`, **Pearson** and **Spearman** correlations.
+   * Saves a scatter with reference line and a robust regression slope:
+
+     * `NP-analysis_real/figures/scatter_rdom_vs_rflip.png`
+   * If `frac_kink` exists, saves:
+
+     * `NP-analysis_real/figures/scatter_kink_vs_rflip.png`
+
+3. **Triage analysis (AUPRC)**
+
+   * Defines an anchor as **fragile** if `r_flip_obs ≤ BUDGET`, with `BUDGET = 0.02` (edit inside the script to adjust).
+   * Builds PR curve and **AUPRC** for ranking by `|c4|` (dominant quartic term magnitude); also reports **F1-max** and threshold at F1-max.
+     Files:
+
+     * `NP-analysis_real/pr_by_abs_c4.csv`
+     * `NP-analysis_real/figures/pr_curve_by_abs_c4.png`
+   * Compares additional scores when available:
+
+     * `1/r_grad`, `1/r_lime`, `1/r_shap` (derived from flip radii),
+     * `grad_norm` (from saliency logs),
+       and writes a comparison table:
+     * `NP-analysis_real/triage_compare_summary.csv`
+       (Per-score PR curves are saved as `pr_by_<prefix>.csv/png`, e.g., `pr_by_per_grad.csv`, `figures/pr_by_per_grad.png`.)
+
+4. **Head-to-head flip rates**
+
+   * Reports share of anchors with `r ≤ BUDGET` for Puiseux vs. XAI baselines, plus median radii:
+
+     * `NP-analysis_real/xai_vs_puiseux_summary.csv`
+
+5. **Joined evidence table + one-pager**
+
+   * Saves the full joined table:
+
+     * `NP-analysis_real/evidence_anchors_joined.csv`
+   * Saves a compact correlation/PR summary:
+
+     * `NP-analysis_real/corr_summary.csv`
+   * Writes a Markdown one-pager with key numbers and figure pointers:
+
+     * `NP-analysis_real/np_evidence_report.md`
+
+**Outputs (folder `NP-analysis_real/`)**
+
+* `evidence_anchors_joined.csv` — anchors + benchmark + dominant-ratio (joined).
+* `corr_summary.csv` — MAE/ρ stats, PR summary, F1-max & threshold.
+* `triage_compare_summary.csv` — AUPRC by score (`|c4|`, `1/r_*`, `grad_norm`).
+* `xai_vs_puiseux_summary.csv` — hit-rates ≤ `BUDGET` and median radii by method.
+* `pr_by_abs_c4.csv`, `figures/pr_curve_by_abs_c4.png` — main PR curve.
+* `pr_by_<prefix>.csv`, `figures/pr_by_<prefix>.png` — extra PR curves (if available).
+* `figures/scatter_rdom_vs_rflip.png` — `r_dom` vs `r_flip_obs`.
+* `figures/scatter_kink_vs_rflip.png` — `frac_kink` vs `r_flip_obs` (if available).
+* `np_evidence_report.md` — textual summary (ready to paste into appendix/supplement).
+
+**Notes**
+
+* If `dominant_ratio_summary.csv` is missing, the script uses `r_dom_pred` from TXT or re-computes `r_dom` from available `|c2|,|c4|`.
+* To change the fragility budget for triage, edit `BUDGET` near the top of the script.
+
+### 11. Newton–Puiseux Evidence & Triage (RadioML 2016.10A)
+
+Same evidence-building and triage pipeline as above, but for **RadioML 2016.10A** artifacts.
+
+**Prerequisites**
+
+- You have completed **Section 4** (RadioML uncertain points) and **Section 9** (Post-Processing Radio Data), which should produce at least:
+  - `up_radio/uncertain_full.csv`
+  - `post_processing_radio/benchmark_point<i>.txt`
+  - *(optional)* `post_processing_radio/dominant_ratio_summary.csv`  
+    If absent, the script will use `r_dom_pred` parsed from TXT; if missing but `|c2|,|c4|` are available, it will compute `r_dom ≈ sqrt(|c2|/|c4|)` automatically.
+
+**Run**
+
+```bash
+python -m NP-analysis_radio.NP-analysis_radio.py
+````
+
+**What this does**
+
+* **Join & normalize** anchors + benchmark TXT + optional dominant-ratio.
+* **Correlation & error**: MAE(|`r_dom`−`r_flip_obs`|), Pearson/Spearman, scatter(s).
+* **Triage (AUPRC)**: PR for `|c4|` + optional scores (`1/r_grad`, `1/r_lime`, `1/r_shap`, `grad_norm`), with CSVs and PNGs.
+* **Head-to-head flip-rates** vs. XAI baselines.
+* **Markdown one-pager** with key metrics and figure references.
+
+**Outputs (folder `NP-analysis_radio/`)**
+
+* `evidence_anchors_joined.csv`
+* `corr_summary.csv`
+* `triage_compare_summary.csv`
+* `xai_vs_puiseux_summary.csv`
+* `pr_by_abs_c4.csv`, `figures/pr_curve_by_abs_c4.png`
+* `pr_by_<prefix>.csv`, `figures/pr_by_<prefix>.png` *(if available)*
+* `figures/scatter_rdom_vs_rflip.png`
+* `figures/scatter_kink_vs_rflip.png` *(if available)*
+* `np_evidence_report.md`
+
+**Notes**
+
+* The fragility budget is `BUDGET = 0.02` (edit in the script to change).
+* The script auto-detects `up_radio/` and `post_processing_radio/` relative to its location and writes results into `NP-analysis_radio/`.
 
 ---
 
