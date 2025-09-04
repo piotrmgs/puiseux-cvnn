@@ -643,6 +643,7 @@ Build a compact, publication-ready summary of Newton–Puiseux evidence by **joi
 **Run**
 
 ```bash
+# From the repo root
 python -m NP-analysis_real.NP-analysis_real.py
 ````
 
@@ -738,6 +739,7 @@ Same evidence-building and triage pipeline as above, but for **RadioML 2016.10A*
 **Run**
 
 ```bash
+# From the repo root
 python -m NP-analysis_radio.NP-analysis_radio.py
 ````
 
