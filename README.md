@@ -4,6 +4,7 @@
 <summary><strong>Table of contents</strong></summary>
 
 - [About this repo](#about-this-repo)
+- [How to cite](#how-to-cite)
 - [Overview](#overview)
 - [Project Structure](#project-structure)
 - [Datasets ⚠️](#datasets)
@@ -33,12 +34,38 @@
 ## About this repo
 This repository contains the complete, reproducible codebase that accompanies the paper *“Newton-Puiseux Analysis for Interpretability and Calibration of Complex-Valued Neural Networks”*. 
 
-[![arXiv](https://img.shields.io/badge/arXiv-2504.19176-b31b1b.svg)](https://arxiv.org/abs/2504.19176)
+[![DOI](https://img.shields.io/badge/DOI-10.1016%2Fj.neunet.2025.108172-blue.svg)](https://doi.org/10.1016/j.neunet.2025.108172)
 
+Published in *Neural Networks*, Volume 195, 2026, Article 108172.  
+[View on ScienceDirect](https://www.sciencedirect.com/science/article/pii/S0893608025010524)
 
-https://arxiv.org/pdf/2504.19176
 
 It implements our end-to-end pipeline – from data preprocessing through CVNN training to Newton–Puiseux-based local analysis – across three settings: (1) a controlled synthetic benchmark, (2) the MIT-BIH arrhythmia corpus, and (3) the RadioML 2016.10A wireless modulation dataset.
+
+---
+
+## How to cite
+
+If you use this code or refer to our results, please cite:
+
+> **Piotr Migus**,  
+> *Newton–Puiseux analysis for interpretability and calibration of complex-valued neural networks*,  
+> Neural Networks, Volume 195, 2026, Article 108172.  
+> [https://doi.org/10.1016/j.neunet.2025.108172](https://doi.org/10.1016/j.neunet.2025.108172)
+
+```bibtex
+@article{Migus2026NPAnalysis,
+  title   = {Newton--Puiseux analysis for interpretability and calibration of complex-valued neural networks},
+  author  = {Piotr Migus},
+  journal = {Neural Networks},
+  volume  = {195},
+  pages   = {108172},
+  year    = {2026},
+  issn    = {0893-6080},
+  doi     = {https://doi.org/10.1016/j.neunet.2025.108172},
+  url     = {https://www.sciencedirect.com/science/article/pii/S0893608025010524}
+}
+```
 
 ---
 
